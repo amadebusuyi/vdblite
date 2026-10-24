@@ -1,0 +1,47 @@
+# Fuzz targets for cargo-fuzz (needs a nightly toolchain):
+#
+#   cargo install cargo-fuzz
+#   cargo +nightly fuzz run chunk
+#   cargo +nightly fuzz run segment_parts
+#   cargo +nightly fuzz run open_file
+#
+# Kept out of the main workspace so stable builds never compile it.
+
+[package]
+name = "vecfile-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3.27"
+vecfile = { path = "../crates/vecfile" }
+vecfile-chunk = { path = "../crates/vecfile-chunk" }
+vecfile-index = { path = "../crates/vecfile-index" }
+
+[workspace]
+
+[[bin]]
+name = "chunk"
+path = "fuzz_targets/chunk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "segment_parts"
+path = "fuzz_targets/segment_parts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "open_file"
+path = "fuzz_targets/open_file.rs"
+test = false
+doc = false
+bench = false

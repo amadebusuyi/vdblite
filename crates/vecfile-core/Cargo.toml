@@ -1,0 +1,22 @@
+[package]
+name = "vecfile-core"
+description = "Single-file page storage and write-ahead log for vecfile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+redb.workspace = true
+serde.workspace = true
+postcard.workspace = true
+zstd.workspace = true
+roaring.workspace = true
+bytemuck.workspace = true
+vecfile-index.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

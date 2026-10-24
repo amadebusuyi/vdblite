@@ -1,0 +1,27 @@
+[package]
+name = "vecfile-index"
+description = "Distance kernels, HNSW and quantization for vecfile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rayon.workspace = true
+parking_lot.workspace = true
+roaring.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "distance"
+harness = false
+
+[[bench]]
+name = "brute_force"
+harness = false
+
+[lints]
+workspace = true

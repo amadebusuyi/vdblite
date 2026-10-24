@@ -1,0 +1,22 @@
+{
+  "name": "vecfile",
+  "version": "0.1.0",
+  "description": "Embedded, single-file vector database (Rust core) for Node.js",
+  "license": "MIT OR Apache-2.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.js"
+    }
+  },
+  "files": ["index.js", "index.mjs", "index.d.ts", "vecfile.node"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "node scripts/build.js",
+    "build:debug": "node scripts/build.js --debug",
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}

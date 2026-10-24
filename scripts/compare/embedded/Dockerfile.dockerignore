@@ -1,0 +1,11 @@
+# Only the Rust sources and this harness go into the build context.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!bindings/node/Cargo.toml
+!bindings/node/build.rs
+!bindings/node/src/
+!fuzz/Cargo.toml
+!scripts/compare/embedded/bench.py
+crates/**/target
