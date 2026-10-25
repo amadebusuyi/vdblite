@@ -39,6 +39,12 @@ fn bench(c: &mut Criterion) {
             g.bench_function(BenchmarkId::new("l2_sq_i8", k.name), |bn| {
                 bn.iter(|| (k.l2_sq_i8)(black_box(&ai), black_box(&bi)))
             });
+            g.bench_function(BenchmarkId::new("dot_f32_i8", k.name), |bn| {
+                bn.iter(|| (k.dot_f32_i8)(black_box(&a), black_box(&bi)))
+            });
+            g.bench_function(BenchmarkId::new("l2_sq_f32_i8", k.name), |bn| {
+                bn.iter(|| (k.l2_sq_f32_i8)(black_box(&a), black_box(&bi)))
+            });
         }
         g.finish();
     }

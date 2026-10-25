@@ -11,6 +11,15 @@
 //! So int8 distances come out in the same units as f32 ones, and candidates
 //! from segments with different quantizers can be merged directly.
 //!
+//! Searches use the asymmetric form instead: the query stays f32 and only
+//! the stored vectors are quantized, which keeps the query's precision.
+//! With `q` prepared once per search ([`ScalarQuantizer::prepare_query`]):
+//!
+//! - Dot: `q · x ≈ C + Σ (s·q_i) · c_i`, with `C = Σ q_i·o_i + 128·s·Σ q_i`.
+//! - L2:  `|q - x|² ≈ s² · Σ (q'_i - c_i)²`, with `q'_i = (q_i - o_i)/s - 128`.
+//!
+//! Neither needs the stored per-vector correction.
+//!
 //! Offsets and the scale come from the 0.1% and 99.9% quantiles of each
 //! dimension, so a few outliers don't spread the codes thin; values outside
 //! the range are clamped.
@@ -89,6 +98,42 @@ impl ScalarQuantizer {
 
     pub fn scale(&self) -> f32 {
         self.scale
+    }
+
+    /// Prepares a query for [`Self::asym_distance`]: writes the transformed
+    /// query into `out` and returns the constant term.
+    pub fn prepare_query(&self, q: &[f32], out: &mut [f32]) -> f32 {
+        assert_eq!(q.len(), self.dim());
+        assert_eq!(out.len(), self.dim());
+        let s = self.scale;
+        match self.metric {
+            Metric::L2 => {
+                let inv = 1.0 / s;
+                for ((o, &x), off) in out.iter_mut().zip(q).zip(&self.offset) {
+                    *o = (x - off) * inv - 128.0;
+                }
+                0.0
+            }
+            Metric::Dot | Metric::Cosine => {
+                let mut c = 0f32;
+                for ((o, &x), off) in out.iter_mut().zip(q).zip(&self.offset) {
+                    *o = s * x;
+                    c += x * off + 128.0 * s * x;
+                }
+                c
+            }
+        }
+    }
+
+    /// Distance from a query prepared by [`Self::prepare_query`] to a code,
+    /// in the same units as f32 distances.
+    #[inline]
+    pub fn asym_distance(&self, k: &Kernels, q: &[f32], q_const: f32, code: &[i8]) -> f32 {
+        match self.metric {
+            Metric::L2 => self.scale * self.scale * (k.l2_sq_f32_i8)(q, code),
+            Metric::Dot => -(q_const + (k.dot_f32_i8)(q, code)),
+            Metric::Cosine => 1.0 - (q_const + (k.dot_f32_i8)(q, code)),
+        }
     }
 
     /// Encodes `v` into `out` and returns its correction term (zero for L2).
@@ -174,6 +219,37 @@ mod tests {
                 max_rel = max_rel.max((approx - exact).abs() / mag.max(1e-6));
             }
             assert!(max_rel < 0.05, "{metric:?}: max relative error {max_rel}");
+        }
+    }
+
+    #[test]
+    fn asymmetric_distance_is_exact_against_the_decoded_vector() {
+        let dim = 48;
+        let rows = data(500, dim, 3);
+        let k = kernels();
+        for metric in [Metric::L2, Metric::Dot, Metric::Cosine] {
+            let quant = ScalarQuantizer::train(&rows, dim, metric);
+            let q = &data(1, dim, 4)[..];
+            let mut prepared = vec![0f32; dim];
+            let c = quant.prepare_query(q, &mut prepared);
+            for row in rows.chunks_exact(dim).take(50) {
+                let mut code = vec![0i8; dim];
+                quant.encode(row, &mut code);
+                let mut decoded = vec![0f32; dim];
+                quant.decode(&code, &mut decoded);
+                let want = metric.distance(k, q, &decoded);
+                let got = quant.asym_distance(k, &prepared, c, &code);
+                let mag = q
+                    .iter()
+                    .zip(&decoded)
+                    .map(|(a, b)| (a * b).abs())
+                    .sum::<f32>()
+                    + crate::distance::scalar::l2_sq_f32(q, &decoded);
+                assert!(
+                    (got - want).abs() <= 1e-4 * mag.max(1.0),
+                    "{metric:?}: {got} vs {want}"
+                );
+            }
         }
     }
 

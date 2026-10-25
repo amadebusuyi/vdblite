@@ -25,6 +25,7 @@ use vecfile_core::changes;
 use vecfile_core::codec::{delete_segment, read_vector, write_segment};
 use vecfile_core::records::Change;
 use vecfile_core::tables::{CHANGES, DEAD, PENDING, SEGMENT_DATA, SEGMENTS, VECTORS};
+use vecfile_index::index::build_replacement;
 use vecfile_index::segment::{VectorStore, prepare};
 
 use crate::collection::CollInner;
@@ -231,6 +232,45 @@ fn compact(access: &Access<'_>, coll: &Arc<CollInner>, merge: bool) -> Result<()
         (*idx.config(), idx.plan_compaction(merge))
     };
     for job in jobs {
+        // A segment grown rather than rebuilt keeps its graph, but the
+        // inserts need its vectors: full precision from the file where they
+        // still exist, decoded codes for ones deleted since.
+        let base = job.base.and_then(|id| {
+            coll.index
+                .read()
+                .sealed_by_id(id)
+                .map(|e| e.segment.clone())
+        });
+        let mut own = Vec::new();
+        if let Some(seg) = &base {
+            own = vec![0f32; seg.len() * cfg.dim];
+            let rows = seg
+                .ids()
+                .chunks(GATHER_BATCH)
+                .zip(own.chunks_mut(GATHER_BATCH * cfg.dim));
+            for (b, (batch, out)) in rows.enumerate() {
+                let read = access.with(|db| {
+                    let rx = db.store.begin_read()?;
+                    let store = FileVectors::new(rx.open_table(VECTORS)?, coll.id);
+                    for (i, (&chunk, row)) in
+                        batch.iter().zip(out.chunks_exact_mut(cfg.dim)).enumerate()
+                    {
+                        if store.read(chunk, row) {
+                            prepare(cfg.metric, row);
+                        } else {
+                            seg.decode((b * GATHER_BATCH + i) as u32, row);
+                        }
+                    }
+                    match store.take_error() {
+                        Some(e) => Err(e.into()),
+                        None => Ok(()),
+                    }
+                })?;
+                if read.is_none() {
+                    return Ok(());
+                }
+            }
+        }
         // Gather the live vectors in short spells. A chunk deleted meanwhile
         // may or may not make it in; either way its tombstone follows it.
         let mut ids = Vec::with_capacity(job.live.len());
@@ -256,8 +296,15 @@ fn compact(access: &Access<'_>, coll: &Arc<CollInner>, merge: bool) -> Result<()
                 return Ok(());
             }
         }
-        let built = (!ids.is_empty()).then(|| access.build(|| cfg.build_segment(&ids, &vectors)));
-        drop(vectors);
+        let built = access.build(|| {
+            build_replacement(
+                &cfg,
+                base.as_deref().map(|seg| (seg, &own[..])),
+                &ids,
+                &vectors,
+            )
+        });
+        drop((own, vectors));
 
         let applied = access.with(|db| {
             let _w = db.writer.lock();

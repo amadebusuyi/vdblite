@@ -25,6 +25,15 @@ fn i8_pair() -> impl Strategy<Value = (Vec<i8>, Vec<i8>)> {
     })
 }
 
+fn f32_i8_pair() -> impl Strategy<Value = (Vec<f32>, Vec<i8>)> {
+    (0usize..1100).prop_flat_map(|n| {
+        (
+            prop::collection::vec(-200.0f32..200.0, n),
+            prop::collection::vec(any::<i8>(), n),
+        )
+    })
+}
+
 /// Tolerance scaled by the sum of absolute terms, which bounds the rounding
 /// error of any summation order.
 fn close(got: f32, want: f32, magnitude: f32) -> bool {
@@ -66,6 +75,19 @@ proptest! {
             prop_assert!(close(got, want_dot, dot_mag), "{} dot: {} vs {}", k.name, got, want_dot);
             let got = (k.l2_sq_f32)(&a, &b);
             prop_assert!(close(got, l2_mag, l2_mag), "{} l2: {} vs {}", k.name, got, l2_mag);
+        }
+    }
+
+    #[test]
+    fn simd_f32_i8_matches_scalar((a, b) in f32_i8_pair()) {
+        let dot_mag: f32 = a.iter().zip(&b).map(|(x, &y)| (x * f32::from(y)).abs()).sum();
+        let want_dot = scalar::dot_f32_i8(&a, &b);
+        let want_l2 = scalar::l2_sq_f32_i8(&a, &b);
+        for k in Kernels::available() {
+            let got = (k.dot_f32_i8)(&a, &b);
+            prop_assert!(close(got, want_dot, dot_mag), "{} dot: {} vs {}", k.name, got, want_dot);
+            let got = (k.l2_sq_f32_i8)(&a, &b);
+            prop_assert!(close(got, want_l2, want_l2), "{} l2: {} vs {}", k.name, got, want_l2);
         }
     }
 

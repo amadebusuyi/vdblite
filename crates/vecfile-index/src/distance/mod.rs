@@ -46,6 +46,44 @@ impl Metric {
     }
 }
 
+/// Asks the CPU to start loading `data` into cache, one hint per 64-byte
+/// line, so a later read doesn't stall on memory. Purely a hint: it has no
+/// effect on results, and is a no-op on other architectures.
+#[inline(always)]
+pub fn prefetch<T>(data: &[T]) {
+    let bytes = std::mem::size_of_val(data);
+    let p = data.as_ptr().cast::<u8>();
+    let mut off = 0;
+    while off < bytes {
+        // SAFETY: `off < bytes`, so the address is inside `data`; prefetch
+        // hints never fault and don't read the memory architecturally.
+        let line = unsafe { p.add(off) };
+        prefetch_line(line);
+        off += 64;
+    }
+}
+
+#[inline(always)]
+fn prefetch_line(p: *const u8) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+        // SAFETY: SSE is part of the x86_64 baseline, and a prefetch is a
+        // hint that never faults, whatever the address.
+        unsafe { _mm_prefetch::<_MM_HINT_T0>(p.cast()) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: `prfm` is a hint that never faults and touches no
+        // registers or memory the compiler tracks.
+        unsafe {
+            std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, readonly, preserves_flags))
+        };
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let _ = p;
+}
+
 /// One complete set of distance kernels for a given instruction set.
 ///
 /// The function pointers are safe to call: a SIMD set can only be obtained
@@ -58,6 +96,9 @@ pub struct Kernels {
     pub l2_sq_f32: fn(&[f32], &[f32]) -> f32,
     pub dot_i8: fn(&[i8], &[i8]) -> i32,
     pub l2_sq_i8: fn(&[i8], &[i8]) -> u32,
+    /// f32 query against int8 code, for asymmetric quantized distances.
+    pub dot_f32_i8: fn(&[f32], &[i8]) -> f32,
+    pub l2_sq_f32_i8: fn(&[f32], &[i8]) -> f32,
 }
 
 impl std::fmt::Debug for Kernels {
@@ -74,6 +115,8 @@ impl Kernels {
         l2_sq_f32: scalar::l2_sq_f32,
         dot_i8: scalar::dot_i8,
         l2_sq_i8: scalar::l2_sq_i8,
+        dot_f32_i8: scalar::dot_f32_i8,
+        l2_sq_f32_i8: scalar::l2_sq_f32_i8,
     };
 
     /// AVX2+FMA kernels, if this is an x86_64 CPU that supports them.

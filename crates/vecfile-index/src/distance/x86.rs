@@ -14,6 +14,8 @@ pub(super) const KERNELS: Kernels = Kernels {
     l2_sq_f32,
     dot_i8,
     l2_sq_i8,
+    dot_f32_i8,
+    l2_sq_f32_i8,
 };
 
 // The safe wrappers below are only reachable through `KERNELS`, which
@@ -41,6 +43,83 @@ fn l2_sq_i8(a: &[i8], b: &[i8]) -> u32 {
     assert_eq!(a.len(), b.len(), "vector length mismatch");
     // SAFETY: the CPU supports AVX2 (see above) and the lengths match.
     unsafe { l2_sq_i8_avx2(a, b) }
+}
+
+fn dot_f32_i8(a: &[f32], b: &[i8]) -> f32 {
+    assert_eq!(a.len(), b.len(), "vector length mismatch");
+    // SAFETY: the CPU supports AVX2+FMA (see above) and the lengths match.
+    unsafe { dot_f32_i8_avx2(a, b) }
+}
+
+fn l2_sq_f32_i8(a: &[f32], b: &[i8]) -> f32 {
+    assert_eq!(a.len(), b.len(), "vector length mismatch");
+    // SAFETY: the CPU supports AVX2+FMA (see above) and the lengths match.
+    unsafe { l2_sq_f32_i8_avx2(a, b) }
+}
+
+/// Eight int8 values at `p`, widened to f32 lanes.
+///
+/// # Safety
+/// Requires AVX2 and 8 readable bytes at `p`.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn load_i8_ps(p: *const i8) -> __m256 {
+    // SAFETY: the caller guarantees 8 readable bytes at `p`.
+    unsafe { _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(p.cast()))) }
+}
+
+/// # Safety
+/// Requires AVX2 and FMA, and `a.len() == b.len()`.
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_f32_i8_avx2(a: &[f32], b: &[i8]) -> f32 {
+    let n = a.len();
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    // SAFETY: every load reads 8 floats and 8 bytes at offset i with i + 8 <= n.
+    unsafe {
+        let mut acc = [_mm256_setzero_ps(); 4];
+        let mut i = 0;
+        while i + 32 <= n {
+            for (j, acc) in acc.iter_mut().enumerate() {
+                let off = i + 8 * j;
+                *acc = _mm256_fmadd_ps(_mm256_loadu_ps(pa.add(off)), load_i8_ps(pb.add(off)), *acc);
+            }
+            i += 32;
+        }
+        while i + 8 <= n {
+            acc[0] = _mm256_fmadd_ps(_mm256_loadu_ps(pa.add(i)), load_i8_ps(pb.add(i)), acc[0]);
+            i += 8;
+        }
+        let sum = _mm256_add_ps(_mm256_add_ps(acc[0], acc[1]), _mm256_add_ps(acc[2], acc[3]));
+        hsum_ps(sum) + scalar::dot_f32_i8(&a[i..], &b[i..])
+    }
+}
+
+/// # Safety
+/// Requires AVX2 and FMA, and `a.len() == b.len()`.
+#[target_feature(enable = "avx2,fma")]
+unsafe fn l2_sq_f32_i8_avx2(a: &[f32], b: &[i8]) -> f32 {
+    let n = a.len();
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    // SAFETY: every load reads 8 floats and 8 bytes at offset i with i + 8 <= n.
+    unsafe {
+        let mut acc = [_mm256_setzero_ps(); 4];
+        let mut i = 0;
+        while i + 32 <= n {
+            for (j, acc) in acc.iter_mut().enumerate() {
+                let off = i + 8 * j;
+                let d = _mm256_sub_ps(_mm256_loadu_ps(pa.add(off)), load_i8_ps(pb.add(off)));
+                *acc = _mm256_fmadd_ps(d, d, *acc);
+            }
+            i += 32;
+        }
+        while i + 8 <= n {
+            let d = _mm256_sub_ps(_mm256_loadu_ps(pa.add(i)), load_i8_ps(pb.add(i)));
+            acc[0] = _mm256_fmadd_ps(d, d, acc[0]);
+            i += 8;
+        }
+        let sum = _mm256_add_ps(_mm256_add_ps(acc[0], acc[1]), _mm256_add_ps(acc[2], acc[3]));
+        hsum_ps(sum) + scalar::l2_sq_f32_i8(&a[i..], &b[i..])
+    }
 }
 
 /// # Safety

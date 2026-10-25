@@ -34,7 +34,9 @@ struct Meta {
 fn read_meta(path: &Path) -> Meta {
     let text = std::fs::read_to_string(path).expect("read meta.json (run prep.py)");
     let field = |key: &str| -> String {
-        let at = text.find(&format!("\"{key}\":")).unwrap_or_else(|| panic!("meta.json: no {key}"));
+        let at = text
+            .find(&format!("\"{key}\":"))
+            .unwrap_or_else(|| panic!("meta.json: no {key}"));
         let rest = text[at + key.len() + 3..].trim_start();
         let end = rest.find([',', '\n', '}']).unwrap();
         rest[..end].trim().trim_matches('"').to_string()
@@ -68,7 +70,11 @@ fn recall(found: &[Vec<u32>], gt: &[&[i32]]) -> f64 {
     let hits: usize = found
         .iter()
         .zip(gt)
-        .map(|(f, t)| f.iter().filter(|id| t[..K].contains(&(**id as i32))).count())
+        .map(|(f, t)| {
+            f.iter()
+                .filter(|id| t[..K].contains(&(**id as i32)))
+                .count()
+        })
         .sum();
     hits as f64 / (found.len() * K) as f64
 }
@@ -105,12 +111,24 @@ fn summary(json: &mut String, knob: usize, lat: &[f64], found: &[Vec<u32>], gt: 
 
 fn build(db_path: &Path, data: &Path, meta: &Meta) -> vecfile::Result<String> {
     let base = read_fvecs(data.join(&meta.base), Some(meta.n)).expect("read base vectors");
-    let metric = if meta.metric == "l2" { Metric::L2 } else { Metric::Cosine };
+    let metric = if meta.metric == "l2" {
+        Metric::L2
+    } else {
+        Metric::Cosine
+    };
     let rss0 = rss_mb("VmRSS");
     let t = Instant::now();
     let db = Db::open(db_path)?;
-    let schema = Schema { dim: base.dim, metric, quant: Quant::Int8, chunking: Chunking::None };
-    let opts = IndexOptions { lexical: false, ..IndexOptions::default() };
+    let schema = Schema {
+        dim: base.dim,
+        metric,
+        quant: Quant::Int8,
+        chunking: Chunking::None,
+    };
+    let opts = IndexOptions {
+        lexical: false,
+        ..IndexOptions::default()
+    };
     let coll = db.create_collection_with("bench", schema, opts)?;
     for start in (0..base.len()).step_by(BATCH) {
         let mut tx = db.begin_write()?;
@@ -228,13 +246,29 @@ fn search(db_path: &Path, data: &Path, meta: &Meta) -> vecfile::Result<String> {
     let _ = std::fs::remove_file(&tiny);
     let floor = {
         let db = Db::open(&tiny)?;
-        let metric = if meta.metric == "l2" { Metric::L2 } else { Metric::Cosine };
-        let schema = Schema { dim: queries[0].len(), metric, quant: Quant::Int8, chunking: Chunking::None };
-        let opts = IndexOptions { lexical: false, ..IndexOptions::default() };
+        let metric = if meta.metric == "l2" {
+            Metric::L2
+        } else {
+            Metric::Cosine
+        };
+        let schema = Schema {
+            dim: queries[0].len(),
+            metric,
+            quant: Quant::Int8,
+            chunking: Chunking::None,
+        };
+        let opts = IndexOptions {
+            lexical: false,
+            ..IndexOptions::default()
+        };
         let coll = db.create_collection_with("bench", schema, opts)?;
         let mut tx = db.begin_write()?;
         for (i, q) in queries[..10].iter().enumerate() {
-            tx.upsert_with_vectors(&coll, Doc::new(i.to_string()).content("q"), vec![q.to_vec()])?;
+            tx.upsert_with_vectors(
+                &coll,
+                Doc::new(i.to_string()).content("q"),
+                vec![q.to_vec()],
+            )?;
         }
         tx.commit()?;
         db.wait_for_maintenance()?;
@@ -276,7 +310,9 @@ fn main() -> vecfile::Result<()> {
     let json = format!(
         "{{{body}, \"engine\": \"vecfile\", \"version\": \"{}\", \"dataset\": {}}}\n",
         env!("CARGO_PKG_VERSION"),
-        std::fs::read_to_string(data.join("bench").join(&dataset).join("meta.json")).unwrap().trim()
+        std::fs::read_to_string(data.join("bench").join(&dataset).join("meta.json"))
+            .unwrap()
+            .trim()
     );
     std::fs::write(out, json).expect("write --out");
     Ok(())

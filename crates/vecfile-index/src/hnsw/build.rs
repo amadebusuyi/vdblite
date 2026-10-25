@@ -57,6 +57,78 @@ where
     b.freeze()
 }
 
+/// Grows an existing graph instead of building from scratch.
+///
+/// The result has nodes `0..n`. Node `i` of `base` becomes node
+/// `remap[i]`, keeping its level and links; the nodes not in `remap` are
+/// inserted the same way [`build`] inserts them. `dist(a, b)` works on the
+/// new numbering. The cost is that of inserting the new nodes only, so
+/// growing a large graph by a little is cheap.
+pub fn extend<F>(base: &Graph, remap: &[u32], n: usize, params: &HnswParams, dist: F) -> Graph
+where
+    F: Fn(u32, u32) -> f32 + Sync,
+{
+    assert_eq!(remap.len(), base.len(), "one new position per base node");
+    assert!(n <= u32::MAX as usize, "too many nodes");
+    if base.is_empty() {
+        return build(n, params, dist);
+    }
+    let mut is_base = vec![false; n];
+    for &r in remap {
+        assert!(
+            (r as usize) < n && !is_base[r as usize],
+            "remap must be injective into 0..n"
+        );
+        is_base[r as usize] = true;
+    }
+    // New nodes get levels from the same distribution, seeded apart from
+    // the base's.
+    let fresh_levels = assign_levels(
+        n,
+        &HnswParams {
+            seed: params.seed ^ (base.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            ..*params
+        },
+    );
+    let mut levels = vec![0u8; n];
+    let mut links: Vec<Mutex<Vec<Vec<u32>>>> = Vec::with_capacity(n);
+    for (node, &fresh) in fresh_levels.iter().enumerate() {
+        if !is_base[node] {
+            levels[node] = fresh;
+        }
+    }
+    for (old, &new) in remap.iter().enumerate() {
+        levels[new as usize] = base.level(old as u32);
+    }
+    for &l in &levels {
+        links.push(Mutex::new(vec![Vec::new(); l as usize + 1]));
+    }
+    for (old, &new) in remap.iter().enumerate() {
+        let mut g = links[new as usize].lock();
+        for (level, list) in g.iter_mut().enumerate() {
+            list.extend(
+                base.neighbors(old as u32, level as u8)
+                    .iter()
+                    .map(|&x| remap[x as usize]),
+            );
+        }
+    }
+    let b = Builder {
+        m: params.m,
+        ef: params.ef_construction.max(params.m),
+        links,
+        entry: RwLock::new((remap[base.entry() as usize], base.max_level())),
+        grow: Mutex::new(()),
+        levels,
+        dist,
+    };
+    let fresh: Vec<u32> = (0..n as u32).filter(|&i| !is_base[i as usize]).collect();
+    fresh
+        .into_par_iter()
+        .for_each_init(|| Scratch::new(n), |s, q| b.insert(q, s));
+    b.freeze()
+}
+
 fn assign_levels(n: usize, params: &HnswParams) -> Vec<u8> {
     if !params.layered {
         return vec![0; n];

@@ -109,7 +109,8 @@ impl Bitset {
 #[derive(Debug, Default)]
 pub struct SegmentScratch {
     graph: SearchScratch,
-    qcode: Vec<i8>,
+    /// The query prepared for asymmetric distances.
+    qprep: Vec<f32>,
     hits: Vec<Neighbor>,
 }
 
@@ -177,6 +178,105 @@ impl SealedSegment {
     }
 
     /// [`Self::build`] with a choice of in-memory representation.
+    /// A segment holding this one's vectors plus `ids`, built by inserting
+    /// the new vectors into this segment's graph rather than rebuilding it,
+    /// so the cost is that of the new vectors only.
+    ///
+    /// `own_vectors` are this segment's vectors, row `i` for local id `i`
+    /// (a deleted one may be its decoded code: it only steers the build).
+    /// `vectors` are the new ones, one row per id; ids must not already be
+    /// here. All vectors must be prepared (see [`prepare`]). Codes are kept
+    /// as they are, and new ones use this segment's quantizer.
+    pub fn extend(
+        &self,
+        own_vectors: &[f32],
+        ids: &[u32],
+        vectors: &[f32],
+        params: &HnswParams,
+    ) -> Self {
+        let dim = self.dim;
+        assert_eq!(
+            own_vectors.len(),
+            self.len() * dim,
+            "one vector per own row"
+        );
+        assert_eq!(ids.len() * dim, vectors.len(), "one vector per id");
+        let mut order: Vec<usize> = (0..ids.len()).collect();
+        order.sort_unstable_by_key(|&i| ids[i]);
+
+        // Merge the two ascending id lists; remember where each row lands.
+        let n = self.len() + ids.len();
+        let mut merged_ids = Vec::with_capacity(n);
+        let mut remap = Vec::with_capacity(self.len());
+        let mut source = Vec::with_capacity(n); // (from_self, row)
+        let (mut a, mut b) = (0, 0);
+        while a < self.len() || b < order.len() {
+            let take_own = b == order.len() || (a < self.len() && self.ids[a] < ids[order[b]]);
+            if take_own {
+                remap.push(merged_ids.len() as u32);
+                merged_ids.push(self.ids[a]);
+                source.push((true, a));
+                a += 1;
+            } else {
+                let id = ids[order[b]];
+                assert!(
+                    merged_ids.last().is_none_or(|&l| l < id),
+                    "ids must be unique and new"
+                );
+                merged_ids.push(id);
+                source.push((false, order[b]));
+                b += 1;
+            }
+        }
+        assert!(
+            merged_ids.windows(2).all(|w| w[0] < w[1]),
+            "ids must be new"
+        );
+
+        let mut all = Vec::with_capacity(n * dim);
+        for &(own, row) in &source {
+            let v = if own { own_vectors } else { vectors };
+            all.extend_from_slice(&v[row * dim..(row + 1) * dim]);
+        }
+        let k = kernels();
+        let metric = self.metric;
+        let graph = hnsw::extend(&self.graph, &remap, n, params, |a, b| {
+            let (a, b) = (a as usize, b as usize);
+            metric.distance(
+                k,
+                &all[a * dim..(a + 1) * dim],
+                &all[b * dim..(b + 1) * dim],
+            )
+        });
+
+        let (codes, corr, full) = if self.vectors.is_empty() {
+            let mut codes = vec![0i8; n * dim];
+            let mut corr = vec![0f32; n];
+            for (i, &(own, row)) in source.iter().enumerate() {
+                let out = &mut codes[i * dim..(i + 1) * dim];
+                if own {
+                    out.copy_from_slice(self.code(row as u32));
+                    corr[i] = self.corr[row];
+                } else {
+                    corr[i] = self.quant.encode(&vectors[row * dim..(row + 1) * dim], out);
+                }
+            }
+            (codes, corr, Vec::new())
+        } else {
+            (Vec::new(), Vec::new(), all)
+        };
+        SealedSegment {
+            dim,
+            metric,
+            graph,
+            quant: self.quant.clone(),
+            codes,
+            corr,
+            vectors: full,
+            ids: merged_ids,
+        }
+    }
+
     pub fn build_with(
         ids: &[u32],
         vectors: &[f32],
@@ -310,8 +410,10 @@ impl SealedSegment {
         let k = kernels();
         if !self.vectors.is_empty() {
             let dist = |local: u32| self.metric.distance(k, query, self.vector(local));
+            let prefetch = |local: u32| crate::distance::prefetch(self.vector(local));
             return self.candidates_with(
                 dist,
+                prefetch,
                 p,
                 tombstones,
                 filter,
@@ -320,20 +422,29 @@ impl SealedSegment {
                 out,
             );
         }
-        s.qcode.resize(self.dim, 0);
-        let qcorr = self.quant.encode(query, &mut s.qcode);
-        let qcode = &s.qcode;
-        let dist = |local: u32| {
-            self.quant
-                .distance(k, qcode, qcorr, self.code(local), self.corr[local as usize])
-        };
-        self.candidates_with(dist, p, tombstones, filter, &mut s.graph, &mut s.hits, out);
+        let prefetch = |local: u32| crate::distance::prefetch(self.code(local));
+        // The query stays f32; only the stored vectors are quantized.
+        s.qprep.resize(self.dim, 0.0);
+        let qconst = self.quant.prepare_query(query, &mut s.qprep);
+        let qprep = &s.qprep;
+        let dist = |local: u32| self.quant.asym_distance(k, qprep, qconst, self.code(local));
+        self.candidates_with(
+            dist,
+            prefetch,
+            p,
+            tombstones,
+            filter,
+            &mut s.graph,
+            &mut s.hits,
+            out,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn candidates_with<D: Fn(u32) -> f32>(
+    fn candidates_with<D: Fn(u32) -> f32, P: Fn(u32)>(
         &self,
         dist: D,
+        prefetch: P,
         p: &SearchParams,
         tombstones: Option<&Bitset>,
         filter: Option<&RoaringBitmap>,
@@ -370,7 +481,8 @@ impl SealedSegment {
         let accept = |local: u32| {
             !dead(local) && filter.is_none_or(|f| f.contains(self.ids[local as usize]))
         };
-        self.graph.search(dist, accept, ef, graph_scratch, hits);
+        self.graph
+            .search_prefetching(dist, accept, prefetch, ef, graph_scratch, hits);
         out.extend(
             hits.iter()
                 .take(p.n)
@@ -600,6 +712,44 @@ mod tests {
             hits >= 9,
             "only {hits}/10 true neighbours among 40 candidates"
         );
+    }
+
+    #[test]
+    fn extended_segments_keep_codes_and_find_everything() {
+        let dim = 24;
+        let data = random(3000, dim, 21);
+        let row = |i: usize| &data[i * dim..(i + 1) * dim];
+        // Global ids interleave: the base holds even ids, the new rows odd.
+        let base_ids: Vec<u32> = (0..2000u32).map(|i| i * 2).collect();
+        let base_data: Vec<f32> = (0..2000).flat_map(|i| row(i).to_vec()).collect();
+        let new_ids: Vec<u32> = (0..1000u32).rev().map(|i| i * 2 + 1).collect();
+        let new_data: Vec<f32> = (0..1000)
+            .rev()
+            .flat_map(|i| row(2000 + i).to_vec())
+            .collect();
+        let base = SealedSegment::build(
+            &base_ids,
+            &base_data,
+            dim,
+            Metric::L2,
+            &HnswParams::default(),
+        );
+        let grown = base.extend(&base_data, &new_ids, &new_data, &HnswParams::default());
+        assert_eq!(grown.len(), 3000);
+        assert!(grown.ids().windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(SealedSegment::from_parts(grown.to_parts()).unwrap(), grown);
+        // The base's codes are reused unchanged.
+        for (local, &g) in base.ids().iter().enumerate() {
+            let gl = grown.local_of(g).unwrap();
+            assert_eq!(grown.code(gl), base.code(local as u32));
+        }
+        // Old and new rows are both found as their own nearest neighbour.
+        let mut s = SegmentScratch::default();
+        for (g, v) in [(0u32, row(0)), (1u32, row(2000)), (1999u32, row(2999))] {
+            let mut out = Vec::new();
+            grown.candidates(v, &params(1), None, None, &mut s, &mut out);
+            assert_eq!(out[0].id, g);
+        }
     }
 
     #[test]

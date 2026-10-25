@@ -16,7 +16,7 @@ mod build;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-pub use build::build;
+pub use build::{build, extend};
 
 use crate::distance::{Metric, kernels};
 use crate::topk::Neighbor;
@@ -79,6 +79,8 @@ pub struct SearchScratch {
     visited: Visited,
     candidates: BinaryHeap<Reverse<Neighbor>>,
     results: BinaryHeap<Neighbor>,
+    /// Unvisited neighbours of the node being expanded.
+    fresh: Vec<u32>,
 }
 
 impl SearchScratch {
@@ -140,7 +142,7 @@ impl Graph {
     /// `out`, closest first. Allocates nothing once `scratch` has warmed up.
     pub fn search<D, A>(
         &self,
-        mut dist: D,
+        dist: D,
         accept: A,
         ef: usize,
         scratch: &mut SearchScratch,
@@ -148,6 +150,25 @@ impl Graph {
     ) where
         D: FnMut(u32) -> f32,
         A: Fn(u32) -> bool,
+    {
+        self.search_prefetching(dist, accept, |_| {}, ef, scratch, out);
+    }
+
+    /// [`Graph::search`], calling `prefetch(node)` on each node shortly
+    /// before `dist(node)`, so whatever `dist` reads can be loaded from
+    /// memory for several nodes at once instead of one after another.
+    pub fn search_prefetching<D, A, P>(
+        &self,
+        mut dist: D,
+        accept: A,
+        prefetch: P,
+        ef: usize,
+        scratch: &mut SearchScratch,
+        out: &mut Vec<Neighbor>,
+    ) where
+        D: FnMut(u32) -> f32,
+        A: Fn(u32) -> bool,
+        P: Fn(u32),
     {
         out.clear();
         if self.is_empty() || ef == 0 {
@@ -184,10 +205,23 @@ impl Graph {
             {
                 break;
             }
+            // The next node to expand: start loading its neighbour list.
+            if let Some(Reverse(next)) = s.candidates.peek() {
+                crate::distance::prefetch(self.neighbors(next.id, 0));
+            }
+            // Find the unvisited neighbours first and prefetch them all, so
+            // their loads overlap rather than stall one by one.
+            s.fresh.clear();
             for &n in self.neighbors(c.id, 0) {
-                if !s.visited.insert(n) {
-                    continue;
+                if s.visited.insert(n) {
+                    s.fresh.push(n);
                 }
+            }
+            for &n in &s.fresh {
+                prefetch(n);
+            }
+            for i in 0..s.fresh.len() {
+                let n = s.fresh[i];
                 let d = dist(n);
                 let worst = s.results.peek().map_or(f32::INFINITY, |r| r.dist);
                 if s.results.len() < ef || d < worst {
@@ -415,6 +449,53 @@ mod tests {
                 .map(|r| r.iter().map(|n| n.id).collect())
                 .collect();
         recall_at_k(&found, &truth, k)
+    }
+
+    #[test]
+    fn extended_graphs_match_fresh_builds() {
+        let dim = 16;
+        let n = 5000;
+        let all = random_vectors(n, dim, 11);
+        let fresh = HnswIndex::build(all.clone(), dim, Metric::L2, &HnswParams::default());
+        // Build over every other node, then insert the rest; the new
+        // numbering interleaves old and new nodes.
+        let old: Vec<u32> = (0..n as u32).filter(|i| i % 2 == 0).collect();
+        let old_vectors: Vec<f32> = old
+            .iter()
+            .flat_map(|&i| all[i as usize * dim..(i as usize + 1) * dim].to_vec())
+            .collect();
+        let base = HnswIndex::build(old_vectors, dim, Metric::L2, &HnswParams::default());
+        let k = kernels();
+        let graph = extend(&base.graph, &old, n, &HnswParams::default(), |a, b| {
+            let (a, b) = (a as usize, b as usize);
+            Metric::L2.distance(
+                k,
+                &all[a * dim..(a + 1) * dim],
+                &all[b * dim..(b + 1) * dim],
+            )
+        });
+        assert_eq!(graph.len(), n);
+        // Every invariant the file loader checks still holds.
+        assert_eq!(Graph::from_parts(graph.to_parts()).unwrap(), graph);
+        // Old nodes keep their level.
+        for (i, &o) in old.iter().enumerate() {
+            assert_eq!(graph.level(o), base.graph.level(i as u32));
+        }
+        let grown = HnswIndex {
+            graph,
+            vectors: all,
+            dim,
+            metric: Metric::L2,
+        };
+        let queries = random_vectors(100, dim, 12);
+        let (r_grown, r_fresh) = (
+            recall(&grown, &queries, 10, 64),
+            recall(&fresh, &queries, 10, 64),
+        );
+        assert!(
+            r_grown > 0.95 && r_grown > r_fresh - 0.02,
+            "grown {r_grown}, fresh {r_fresh}"
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
@@ -51,7 +52,7 @@ impl IndexConfig {
             rerank: 4,
             brute_force_below: 0.02,
             rebuild_dead_ratio: 0.2,
-            max_segment: 262_144,
+            max_segment: 1_048_576,
             quantization: Quantization::Int8,
         }
     }
@@ -106,6 +107,26 @@ thread_local! {
     static SCRATCH: RefCell<SegmentScratch> = RefCell::new(SegmentScratch::default());
 }
 
+/// Searches in flight in this process, across every index. A search fans
+/// out over its segments only while there are idle cores to fan out to;
+/// under load, each search runs on its caller's thread, which wastes nothing
+/// on hand-offs between threads.
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+struct InFlight(usize);
+
+impl InFlight {
+    fn enter() -> Self {
+        InFlight(IN_FLIGHT.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// A copy of the mutable segment's contents, taken so a seal can build its
 /// graph without holding any lock on the index.
 pub struct MutableSnapshot {
@@ -146,8 +167,18 @@ pub struct PendingSeal {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompactionJob {
     pub remove: Vec<u64>,
+    /// A segment (one of `remove`) to grow rather than rebuild: its graph
+    /// and codes are kept, and the other segments' vectors are inserted.
+    pub base: Option<u64>,
+    /// Live ids to build from: every removed segment's without a base, the
+    /// other segments' with one.
     pub live: Vec<u32>,
 }
+
+/// Background maintenance merges a run of adjacent segments once it is this
+/// long. Merges grow the run's largest segment, so each vector is inserted
+/// into a large graph about once rather than rebuilt at every merge.
+const BACKGROUND_MERGE_RUN: usize = 4;
 
 /// What changed when a sealed segment was installed or rebuilt, so storage
 /// can persist it.
@@ -335,32 +366,35 @@ impl VectorIndex {
         !self.compaction_groups(merge).is_empty()
     }
 
+    /// Runs of adjacent segments whose live vectors fit in `max_segment`
+    /// merge: any run of two or more with `merge`, otherwise only runs of
+    /// [`BACKGROUND_MERGE_RUN`] or more. A segment outside such a run whose
+    /// dead ratio passed the threshold is rebuilt alone.
     fn compaction_groups(&self, merge: bool) -> Vec<Vec<usize>> {
         let rebuild = |e: &SealedEntry| e.dead_ratio() >= self.cfg.rebuild_dead_ratio;
+        let min_run = if merge { 2 } else { BACKGROUND_MERGE_RUN };
         let mut groups = Vec::new();
         let mut run: Vec<usize> = Vec::new();
         let mut run_live = 0;
         let flush = |run: &mut Vec<usize>, groups: &mut Vec<Vec<usize>>| {
-            if run.len() > 1 || run.first().is_some_and(|&i| rebuild(&self.sealed[i])) {
+            if run.len() >= min_run {
                 groups.push(std::mem::take(run));
+            } else {
+                groups.extend(
+                    run.iter()
+                        .filter(|&&i| rebuild(&self.sealed[i]))
+                        .map(|&i| vec![i]),
+                );
             }
             run.clear();
         };
         for (i, e) in self.sealed.iter().enumerate() {
-            let mergeable = merge && e.live() < self.cfg.max_segment / 2;
-            if mergeable && run_live + e.live() <= self.cfg.max_segment {
-                run.push(i);
-                run_live += e.live();
-                continue;
+            if !run.is_empty() && run_live + e.live() > self.cfg.max_segment {
+                flush(&mut run, &mut groups);
+                run_live = 0;
             }
-            flush(&mut run, &mut groups);
-            run_live = 0;
-            if mergeable {
-                run.push(i);
-                run_live = e.live();
-            } else if rebuild(e) {
-                groups.push(vec![i]);
-            }
+            run.push(i);
+            run_live += e.live();
         }
         flush(&mut run, &mut groups);
         groups
@@ -373,13 +407,31 @@ impl VectorIndex {
         self.compaction_groups(merge)
             .into_iter()
             .map(|g| {
+                // Grow the largest clean member if it holds at least half the
+                // live vectors; otherwise inserting would cost about as much
+                // as rebuilding, and a rebuild sheds the tombstones.
+                let total: usize = g.iter().map(|&i| self.sealed[i].live()).sum();
+                let base = (g.len() > 1)
+                    .then(|| {
+                        g.iter()
+                            .map(|&i| &self.sealed[i])
+                            .filter(|e| e.dead_ratio() < self.cfg.rebuild_dead_ratio)
+                            .max_by_key(|e| e.live())
+                    })
+                    .flatten()
+                    .filter(|e| e.live() * 2 >= total)
+                    .map(|e| e.id);
                 let mut job = CompactionJob {
                     remove: Vec::new(),
+                    base,
                     live: Vec::new(),
                 };
                 for i in g {
                     let e = &self.sealed[i];
                     job.remove.push(e.id);
+                    if Some(e.id) == base {
+                        continue;
+                    }
                     job.live.extend(
                         e.segment
                             .ids()
@@ -394,6 +446,11 @@ impl VectorIndex {
             .collect()
     }
 
+    /// The sealed segment with this id.
+    pub fn sealed_by_id(&self, id: u64) -> Option<&SealedEntry> {
+        self.sealed.iter().find(|e| e.id == id)
+    }
+
     /// Builds the replacement segment for a job, reading vectors from
     /// `store`. Needs only `&self`, so it can run outside a write lock.
     /// Returns `None` when nothing in the job is still live.
@@ -402,6 +459,13 @@ impl VectorIndex {
         job: &CompactionJob,
         store: &dyn VectorStore,
     ) -> Option<SealedSegment> {
+        let base = job
+            .base
+            .and_then(|id| self.sealed_by_id(id))
+            .map(|e| e.segment.clone());
+        let own = base
+            .as_ref()
+            .map(|seg| base_vectors(seg, self.cfg.metric, store));
         let mut ids = Vec::with_capacity(job.live.len());
         let mut vectors = Vec::with_capacity(job.live.len() * self.cfg.dim);
         let mut buf = vec![0f32; self.cfg.dim];
@@ -412,7 +476,8 @@ impl VectorIndex {
                 vectors.extend_from_slice(&buf);
             }
         }
-        (!ids.is_empty()).then(|| self.cfg.build_segment(&ids, &vectors))
+        let base = base.as_deref().zip(own.as_deref());
+        build_replacement(&self.cfg, base, &ids, &vectors)
     }
 
     /// Swaps the segments a job removes for its replacement (if any).
@@ -509,7 +574,10 @@ impl VectorIndex {
             });
             out
         };
-        let lists: Vec<Vec<Neighbor>> = if self.sealed.len() > 1 {
+        let in_flight = InFlight::enter();
+        let fan_out = self.sealed.len() > 1
+            && in_flight.0 * self.sealed.len() <= rayon::current_num_threads();
+        let lists: Vec<Vec<Neighbor>> = if fan_out {
             self.sealed.par_iter().map(per_segment).collect()
         } else {
             self.sealed.iter().map(per_segment).collect()
@@ -544,6 +612,37 @@ impl VectorIndex {
             }
         }
         top.into_sorted_vec()
+    }
+}
+
+/// A segment's own vectors for growing it: full precision from `store`
+/// where it still has them, decoded codes for vectors deleted since (they
+/// only steer the build). Row `i` is local id `i`, prepared.
+pub fn base_vectors(seg: &SealedSegment, metric: Metric, store: &dyn VectorStore) -> Vec<f32> {
+    let dim = seg.dim();
+    let mut out = vec![0f32; seg.len() * dim];
+    for (local, (&global, row)) in seg.ids().iter().zip(out.chunks_exact_mut(dim)).enumerate() {
+        if store.read(global, row) {
+            prepare(metric, row);
+        } else {
+            seg.decode(local as u32, row);
+        }
+    }
+    out
+}
+
+/// A compaction's replacement: `base` (a segment and its own vectors, see
+/// [`base_vectors`]) grown by the new vectors, or a fresh build from them.
+/// `None` if there is nothing to build from.
+pub fn build_replacement(
+    cfg: &IndexConfig,
+    base: Option<(&SealedSegment, &[f32])>,
+    ids: &[u32],
+    vectors: &[f32],
+) -> Option<SealedSegment> {
+    match base {
+        Some((seg, own)) => Some(seg.extend(own, ids, vectors, &cfg.hnsw)),
+        None => (!ids.is_empty()).then(|| cfg.build_segment(ids, vectors)),
     }
 }
 
@@ -769,6 +868,73 @@ mod tests {
         assert_eq!(
             replica.search(&q, 5, 64, None, &store),
             writer.search(&q, 5, 64, None, &store)
+        );
+    }
+
+    #[test]
+    fn merges_grow_the_largest_segment() {
+        let dim = 8;
+        let data = random(4500, dim, 1);
+        let mut idx = VectorIndex::new(cfg(dim));
+        let mut store = HashMap::new();
+        let add = |idx: &mut VectorIndex,
+                   store: &mut HashMap<u32, Vec<f32>>,
+                   range: std::ops::Range<usize>| {
+            for i in range {
+                let v = &data[i * dim..(i + 1) * dim];
+                idx.insert(i as u32, v);
+                store.insert(i as u32, v.to_vec());
+                if idx.should_seal() {
+                    idx.seal();
+                }
+            }
+        };
+        // Equal segments: no member dominates, so the merge rebuilds.
+        add(&mut idx, &mut store, 0..3000);
+        let jobs = idx.plan_compaction(true);
+        assert_eq!((jobs.len(), jobs[0].base), (1, None));
+        idx.compact(&store, true);
+        assert_eq!(idx.sealed().len(), 1);
+        // A big segment and a small one: the merge grows the big one.
+        add(&mut idx, &mut store, 3000..4500);
+        assert_eq!(idx.sealed().len(), 2);
+        let jobs = idx.plan_compaction(true);
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        let big = idx.sealed().iter().max_by_key(|e| e.live()).unwrap().id;
+        assert_eq!(job.base, Some(big));
+        assert_eq!(
+            job.live.len(),
+            1000,
+            "only the small segment's rows are inserted"
+        );
+        let built = idx.build_compaction(job, &store).unwrap();
+        idx.delete(10); // deleted during the build: stays deleted
+        let id = idx.allocate_segment_id();
+        idx.apply_compaction(job, Some((id, built)));
+        assert_eq!(idx.sealed().len(), 1);
+        assert_eq!(idx.len(), 4500 - 1);
+        assert_eq!(idx.sealed_segment_of(10), None);
+        for i in [777usize, 3500] {
+            let q = &data[i * dim..(i + 1) * dim];
+            assert_eq!(idx.search(q, 1, 64, None, &store)[0].id, i as u32);
+        }
+    }
+
+    #[test]
+    fn background_merges_wait_for_a_run() {
+        let dim = 4;
+        let (idx, _, _) = filled(3000, dim);
+        assert_eq!(idx.sealed().len(), 3);
+        assert!(
+            !idx.needs_compaction(false),
+            "three segments: no background merge yet"
+        );
+        assert!(idx.needs_compaction(true));
+        let (idx, _, _) = filled(4000, dim);
+        assert!(
+            idx.needs_compaction(false),
+            "four segments merge in the background"
         );
     }
 

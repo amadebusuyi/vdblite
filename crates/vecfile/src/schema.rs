@@ -76,6 +76,11 @@ impl Chunking {
     }
 }
 
+/// Merges grow segments up to this many times the seal threshold (about 1M
+/// chunks by default). Fewer, larger graphs search with less work: a query
+/// walks each segment's graph in full.
+const SEGMENT_GROWTH: usize = 16;
+
 /// Index tuning for a collection; [`IndexOptions::default`] suits most uses.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IndexOptions {
@@ -196,7 +201,7 @@ pub(crate) fn index_config(schema: &Schema, opts: &IndexOptions) -> IndexConfig 
     IndexConfig {
         hnsw: opts.hnsw,
         seal_threshold: opts.seal_threshold,
-        max_segment: (opts.seal_threshold * 4).max(1),
+        max_segment: (opts.seal_threshold * SEGMENT_GROWTH).max(1),
         quantization: match schema.quant {
             Quant::Int8 => Quantization::Int8,
             Quant::None => Quantization::None,

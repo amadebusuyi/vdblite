@@ -14,6 +14,8 @@ pub(super) const KERNELS: Kernels = Kernels {
     l2_sq_f32,
     dot_i8,
     l2_sq_i8,
+    dot_f32_i8,
+    l2_sq_f32_i8,
 };
 
 // The safe wrappers below are only reachable through `KERNELS`, which
@@ -41,6 +43,85 @@ fn l2_sq_i8(a: &[i8], b: &[i8]) -> u32 {
     assert_eq!(a.len(), b.len(), "vector length mismatch");
     // SAFETY: the CPU supports NEON (see above) and the lengths match.
     unsafe { l2_sq_i8_neon(a, b) }
+}
+
+fn dot_f32_i8(a: &[f32], b: &[i8]) -> f32 {
+    assert_eq!(a.len(), b.len(), "vector length mismatch");
+    // SAFETY: the CPU supports NEON (see above) and the lengths match.
+    unsafe { dot_f32_i8_neon(a, b) }
+}
+
+fn l2_sq_f32_i8(a: &[f32], b: &[i8]) -> f32 {
+    assert_eq!(a.len(), b.len(), "vector length mismatch");
+    // SAFETY: the CPU supports NEON (see above) and the lengths match.
+    unsafe { l2_sq_f32_i8_neon(a, b) }
+}
+
+/// Eight int8 values at `p`, widened to two f32x4 halves.
+///
+/// # Safety
+/// Requires NEON and 8 readable bytes at `p`.
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn load_i8_f32x8(p: *const i8) -> (float32x4_t, float32x4_t) {
+    // SAFETY: the caller guarantees 8 readable bytes at `p`.
+    let w = vmovl_s8(unsafe { vld1_s8(p) });
+    (
+        vcvtq_f32_s32(vmovl_s16(vget_low_s16(w))),
+        vcvtq_f32_s32(vmovl_high_s16(w)),
+    )
+}
+
+/// # Safety
+/// Requires NEON and `a.len() == b.len()`.
+#[target_feature(enable = "neon")]
+unsafe fn dot_f32_i8_neon(a: &[f32], b: &[i8]) -> f32 {
+    let n = a.len();
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    // SAFETY: every load reads 8 floats and 8 bytes at offset i with i + 8 <= n.
+    unsafe {
+        let mut acc = [vdupq_n_f32(0.0); 4];
+        let mut i = 0;
+        while i + 16 <= n {
+            let (c0, c1) = load_i8_f32x8(pb.add(i));
+            let (c2, c3) = load_i8_f32x8(pb.add(i + 8));
+            acc[0] = vfmaq_f32(acc[0], vld1q_f32(pa.add(i)), c0);
+            acc[1] = vfmaq_f32(acc[1], vld1q_f32(pa.add(i + 4)), c1);
+            acc[2] = vfmaq_f32(acc[2], vld1q_f32(pa.add(i + 8)), c2);
+            acc[3] = vfmaq_f32(acc[3], vld1q_f32(pa.add(i + 12)), c3);
+            i += 16;
+        }
+        while i + 8 <= n {
+            let (c0, c1) = load_i8_f32x8(pb.add(i));
+            acc[0] = vfmaq_f32(acc[0], vld1q_f32(pa.add(i)), c0);
+            acc[1] = vfmaq_f32(acc[1], vld1q_f32(pa.add(i + 4)), c1);
+            i += 8;
+        }
+        let sum = vaddq_f32(vaddq_f32(acc[0], acc[1]), vaddq_f32(acc[2], acc[3]));
+        vaddvq_f32(sum) + scalar::dot_f32_i8(&a[i..], &b[i..])
+    }
+}
+
+/// # Safety
+/// Requires NEON and `a.len() == b.len()`.
+#[target_feature(enable = "neon")]
+unsafe fn l2_sq_f32_i8_neon(a: &[f32], b: &[i8]) -> f32 {
+    let n = a.len();
+    let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    // SAFETY: every load reads 8 floats and 8 bytes at offset i with i + 8 <= n.
+    unsafe {
+        let mut acc = [vdupq_n_f32(0.0); 2];
+        let mut i = 0;
+        while i + 8 <= n {
+            let (c0, c1) = load_i8_f32x8(pb.add(i));
+            let d0 = vsubq_f32(vld1q_f32(pa.add(i)), c0);
+            let d1 = vsubq_f32(vld1q_f32(pa.add(i + 4)), c1);
+            acc[0] = vfmaq_f32(acc[0], d0, d0);
+            acc[1] = vfmaq_f32(acc[1], d1, d1);
+            i += 8;
+        }
+        vaddvq_f32(vaddq_f32(acc[0], acc[1])) + scalar::l2_sq_f32_i8(&a[i..], &b[i..])
+    }
 }
 
 /// # Safety

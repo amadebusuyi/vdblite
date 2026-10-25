@@ -38,3 +38,23 @@ pub fn l2_sq_i8(a: &[i8], b: &[i8]) -> u32 {
         })
         .sum()
 }
+
+/// Inner product of an f32 vector and an int8 vector.
+#[inline]
+pub fn dot_f32_i8(a: &[f32], b: &[i8]) -> f32 {
+    assert_eq!(a.len(), b.len(), "vector length mismatch");
+    a.iter().zip(b).map(|(x, &y)| x * f32::from(y)).sum()
+}
+
+/// Squared Euclidean distance between an f32 vector and an int8 vector.
+#[inline]
+pub fn l2_sq_f32_i8(a: &[f32], b: &[i8]) -> f32 {
+    assert_eq!(a.len(), b.len(), "vector length mismatch");
+    a.iter()
+        .zip(b)
+        .map(|(x, &y)| {
+            let d = x - f32::from(y);
+            d * d
+        })
+        .sum()
+}

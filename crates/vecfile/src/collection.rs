@@ -737,6 +737,24 @@ impl Search<'_> {
         Ok(out)
     }
 
+    /// The best-matching chunk ids and scores, best first, without reading
+    /// any document: the cheapest result shape. Look chunks up later with
+    /// the other result shapes or [`Collection::chunks`].
+    ///
+    /// Unlike the hydrating shapes, this doesn't re-check each chunk against
+    /// the snapshot, so a chunk deleted by a commit that lands during the
+    /// search can still appear.
+    pub fn chunk_ids(self) -> Result<Vec<(u32, f32)>> {
+        guard(|| {
+            Ok(self
+                .raw(self.k)?
+                .1
+                .iter()
+                .map(|h| (h.id, h.score))
+                .collect())
+        })
+    }
+
     /// Each hit widened by `n` chunks on either side; passages of the same
     /// document that touch are merged.
     pub fn expand(self, n: u32) -> Result<Vec<Passage>> {
