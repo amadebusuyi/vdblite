@@ -170,6 +170,11 @@ export interface CollectionInfo {
   overlapTokens?: number
 }
 
+export interface OpenOptions {
+  /** Bytes of file pages to cache in this process (default 256 MiB). */
+  cacheBytes?: number
+}
+
 export interface IndexStats {
   chunks: number
   sealedSegments: number
@@ -187,11 +192,11 @@ export interface VecfileError extends Error {
 
 export declare class Database {
   /** Opens (or creates) a file for writing; other processes may open it read-only alongside. */
-  static open(path: string): Database
+  static open(path: string, options?: OpenOptions): Database
   /** Opens for writing with no other process allowed; small commits are about twice as fast. */
-  static openExclusive(path: string): Database
+  static openExclusive(path: string, options?: OpenOptions): Database
   /** Opens an existing file read-only, following the writing process's commits. */
-  static openReadOnly(path: string): Database
+  static openReadOnly(path: string, options?: OpenOptions): Database
   static compactFile(path: string): boolean
   readonly path: string
   readonly closed: boolean
@@ -237,4 +242,4 @@ export declare class Collection {
   searchText(text: string, embed: Embedder, options: SearchOptions & { mode: 'expand' | 'sections'; neighbors?: number; hybrid?: boolean }): Promise<Passage[]>
 }
 
-export declare function open(path: string): Database
+export declare function open(path: string, options?: OpenOptions): Database

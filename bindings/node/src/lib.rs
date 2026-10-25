@@ -16,8 +16,8 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde_json::{Number, Value, json};
 use vecfile::{
-    Agg, ChunkHit, Chunking, Db, Doc, Filter, HnswParams, IndexOptions, MetaValue, Metric, Passage,
-    Quant, Schema,
+    Agg, ChunkHit, Chunking, Db, Doc, Filter, HnswParams, IndexOptions, MetaValue, Metric,
+    OpenOptions, Passage, Quant, Schema,
 };
 
 // ---------------------------------------------------------------- errors
@@ -250,6 +250,12 @@ pub struct SearchOptions {
 }
 
 #[napi(object)]
+pub struct OpenInput {
+    /// Bytes of file pages to cache in this process.
+    pub cache_bytes: Option<f64>,
+}
+
+#[napi(object)]
 pub struct IndexStats {
     pub chunks: u32,
     pub sealed_segments: u32,
@@ -378,20 +384,30 @@ impl Database {
     /// Opens (or creates) the database file at `path` for writing; other
     /// processes may open it read-only alongside.
     #[napi(factory)]
-    pub fn open(path: String) -> Result<Database> {
-        Self::wrap(Db::open(&path).or_napi()?, path)
+    pub fn open(path: String, options: Option<OpenInput>) -> Result<Database> {
+        Self::open_as(path, OpenOptions::new(), options)
     }
 
     /// Opens for writing with no other process allowed, not even readers.
     #[napi(factory)]
-    pub fn open_exclusive(path: String) -> Result<Database> {
-        Self::wrap(Db::open_exclusive(&path).or_napi()?, path)
+    pub fn open_exclusive(path: String, options: Option<OpenInput>) -> Result<Database> {
+        Self::open_as(path, OpenOptions::new().exclusive(true), options)
     }
 
     /// Opens an existing file read-only, alongside its writer.
     #[napi(factory)]
-    pub fn open_read_only(path: String) -> Result<Database> {
-        Self::wrap(Db::open_read_only(&path).or_napi()?, path)
+    pub fn open_read_only(path: String, options: Option<OpenInput>) -> Result<Database> {
+        Self::open_as(path, OpenOptions::new().read_only(true), options)
+    }
+
+    fn open_as(path: String, mut o: OpenOptions, input: Option<OpenInput>) -> Result<Database> {
+        if let Some(bytes) = input.and_then(|i| i.cache_bytes) {
+            if !(bytes.is_finite() && bytes >= 0.0) {
+                return Err(invalid("cacheBytes must be a non-negative number"));
+            }
+            o = o.cache_bytes(bytes as usize);
+        }
+        Self::wrap(Db::open_with(&path, &o).or_napi()?, path)
     }
 
     fn wrap(db: Db, path: String) -> Result<Database> {

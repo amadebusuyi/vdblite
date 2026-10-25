@@ -64,8 +64,17 @@ On an 8-core Intel i9 laptop (AVX2), SIFT1M (1M x 128):
 | --- | --- | --- | --- |
 | Full API, 1M documents in a `.vdb`, incl. reading results from the file | 0.992 | 355 µs | 488 µs |
 
-At 1M x 768 (synthetic, embedding-shaped) the resident index is 918 MB and
-p99 is 464 µs. Full results, including filtered search and the caveats,
+On 1M real 768-dim text embeddings (arXiv titles), one graph, 16 threads:
+
+| ids only | recall@10 | QPS |
+| --- | --- | --- |
+| ef=64 | 0.938 | 17,081 |
+| ef=128 | 0.969 | 9,319 |
+| ef=256 | 0.986 | 3,885 |
+
+The resident index is about 920 MB (int8 codes and graph; f32 vectors stay
+in the file). Collections that need recall of 0.99 or more do better with
+`hnsw.m = 32`. Full results, including filtered search and the caveats,
 are in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Layout

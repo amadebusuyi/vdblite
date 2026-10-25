@@ -4,6 +4,7 @@
 //! ```text
 //! qps --db data/arxiv768-opt.vdb --data data/arxiv768 [--n 999000] \
 //!     [--threads 1,16] [--ef 64] [--secs 10] [--mode chunks|ids] [--optimize]
+//!     [--cache-mb N]
 //! ```
 //!
 //! The database is one built by `steady_state` (document `i` is row `i` of
@@ -22,7 +23,7 @@ use std::time::{Duration, Instant};
 use vecfile::advanced::index::brute_force;
 use vecfile::advanced::index::dataset::{read_fvecs, read_ivecs};
 use vecfile::advanced::index::recall::recall_at_k;
-use vecfile::{Collection, Db, Metric};
+use vecfile::{Collection, Db, Metric, OpenOptions};
 
 const K: usize = 10;
 
@@ -37,6 +38,7 @@ fn main() -> vecfile::Result<()> {
     let mut secs = 10u64;
     let mut ids = false;
     let mut optimize = false;
+    let mut cache_mb: Option<usize> = None;
     let list =
         |s: String| -> Vec<usize> { s.split(',').map(|v| v.trim().parse().unwrap()).collect() };
     while let Some(a) = args.next() {
@@ -55,6 +57,7 @@ fn main() -> vecfile::Result<()> {
             "--secs" => secs = args.next().and_then(|v| v.parse().ok()).expect("--secs S"),
             "--mode" => ids = args.next().expect("--mode chunks|ids") == "ids",
             "--optimize" => optimize = true,
+            "--cache-mb" => cache_mb = args.next().and_then(|v| v.parse().ok()),
             other => panic!("unknown argument {other}"),
         }
     }
@@ -71,7 +74,11 @@ fn main() -> vecfile::Result<()> {
         println!("optimize in {:.1?}", t.elapsed());
     }
     let t = Instant::now();
-    let db = Db::open(&db_path)?;
+    let mut options = OpenOptions::new();
+    if let Some(mb) = cache_mb {
+        options = options.cache_bytes(mb << 20);
+    }
+    let db = Db::open_with(&db_path, &options)?;
     let coll = db.collection("docs")?;
     println!(
         "opened in {:.2?}: {:?}; mode {}",
@@ -88,11 +95,25 @@ fn main() -> vecfile::Result<()> {
         let recall = recall_at_k(&found, &truth, K);
         for &t in &threads {
             let qps = throughput(&coll, &queries, dim, ef, ids, t, Duration::from_secs(secs));
-            println!("ef={ef:<4} recall@10 {recall:.4}  threads {t:>2}: {qps:>8.0} QPS");
+            println!(
+                "ef={ef:<4} recall@10 {recall:.4}  threads {t:>2}: {qps:>8.0} QPS  (resident {} MB)",
+                resident_mb()
+            );
             std::io::stdout().flush().ok();
         }
     }
     Ok(())
+}
+
+/// This process's resident memory, from `ps`.
+fn resident_mb() -> String {
+    std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map_or("?".into(), |kb| (kb / 1024).to_string())
 }
 
 /// Row ids of the `K` nearest neighbours.

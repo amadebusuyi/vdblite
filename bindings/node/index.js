@@ -85,21 +85,21 @@ async function runEmbedder(embed, texts) {
 class Database {
   /** Opens (or creates) the database file at `path` for writing. Other
    * processes may open it read-only alongside (see `openReadOnly`). */
-  static open(path) {
-    return new Database(callSync(() => native.Database.open(path)))
+  static open(path, options) {
+    return new Database(callSync(() => native.Database.open(path, options)))
   }
 
   /** Opens for writing with no other process allowed, not even readers;
    * small commits are then about twice as fast. */
-  static openExclusive(path) {
-    return new Database(callSync(() => native.Database.openExclusive(path)))
+  static openExclusive(path, options) {
+    return new Database(callSync(() => native.Database.openExclusive(path, options)))
   }
 
   /** Opens an existing file read-only, alongside the process writing it.
    * Reads and searches see each of its commits as it lands; writes fail
    * with code 'READ_ONLY'. */
-  static openReadOnly(path) {
-    return new Database(callSync(() => native.Database.openReadOnly(path)))
+  static openReadOnly(path, options) {
+    return new Database(callSync(() => native.Database.openReadOnly(path, options)))
   }
 
   /** Shrinks a database file that is not open anywhere. */
@@ -374,8 +374,10 @@ class Collection {
 }
 
 /** Opens (or creates) a database file. */
-function open(path) {
-  return Database.open(path)
+/** Opens (or creates) a database file. `options.cacheBytes` sets the page
+ * cache size. */
+function open(path, options) {
+  return Database.open(path, options)
 }
 
 module.exports = { open, Database, Collection }

@@ -8,6 +8,73 @@ efConstruction=200 throughout. Latencies are single-query (one query at a
 time; multi-segment searches fan out over threads). recall@10 is tie-aware
 unless marked "by id".
 
+## 2026-10-25 — Phase 7: search throughput, memory, recall
+
+1M real 768-dim embeddings (arXiv titles, InstructorXL;
+`scripts/fetch-arxiv768.sh`), cosine, 1,000 held-out queries, exact ground
+truth. `examples/qps.rs`, ids only unless noted. **This laptop was shared
+with other work** (load average often 10–25), so throughput is the median
+of interleaved runs and varies ±30% between sessions; recall is exact. See
+`docs/design/phase-7.md`.
+
+Layout, through the database (16 threads, medians of 3 interleaved runs):
+
+| Recall@10 | 5 segments (before) | 1 graph (after) |
+| --- | --- | --- |
+| ~0.94 | 5,805 QPS (ef=32) | 17,081 QPS (ef=64, 0.938) |
+| ~0.97 | 4,068 (ef=64, 0.967) | 9,319 (ef=128, 0.969) |
+| ~0.987 | 2,245 (ef=128, 0.988) | 3,885 (ef=256, 0.986) |
+
+With hydration (text + metadata), 1 graph: 13,603 QPS at ef=64, 8,746 at
+ef=128. Single-threaded, after optimize: p50 852 µs at ef=64, 997 µs at
+ef=128 (search + hydration).
+
+Ingest of the 1M with growing merges: 1,258 s (794 docs/s; commit p50
+984 ms), then 460 s for background maintenance to reach **one segment**
+(+12K buffered), recall@10 0.9431 at ef=64 / 0.9736 at ef=128 (a rebuilt
+graph: 0.9376 / 0.9694). Before: 849 s ingest, 15 segments, and a 17-minute
+rebuild to reach one graph. File 8.6 GB before `compact_file`.
+
+Page cache (with hydration, 16 threads, ef=128, 2 runs each):
+
+| Cache | QPS | Resident |
+| --- | --- | --- |
+| 1 GiB (old default) | 10,058 / 9,959 | 1.41 GB |
+| 256 MiB (new default) | 11,521 / 10,968 | 1.50 GB |
+| 64 MiB | 7,180 / 7,221 | 1.25 GB |
+
+(20-second runs don't fill a 1 GiB cache; a long-running process re-ranking
+across the 3 GB vector table would, which 256 MiB caps.)
+
+Graph parameters, index level (in-memory re-rank), 200K of the same
+vectors, 5 interleaved rounds, median QPS on 16 threads:
+
+| M | ef=32 | ef=64 | ef=128 | ef=256 | index |
+| --- | --- | --- | --- | --- | --- |
+| 16 | 0.910 · 30,577 | 0.948 · 22,251 | 0.979 · 12,907 | 0.991 · 7,252 | 184 MB |
+| 32 | 0.954 · 18,992 | 0.974 · 13,398 | 0.992 · 7,756 | 0.997 · 4,420 | 209 MB |
+
+Kernels (criterion, 768 dims, AVX2, under load ~9 so ~30–50% above the
+Phase 0 figures): dot_f32 46 ns, dot_i8 38 ns, dot_f32_i8 (new, asymmetric)
+60 ns.
+
+Not reproduced cleanly this session: `segments_sift` and `sift_db` ran at
+load 35 (`segments_sift` concurrent 2,626 QPS against 4,417 in Phase 3;
+`sift_db` 4,442 QPS with hydration on 16 threads, not measured before);
+rerun on a quiet machine.
+
+## 2026-10-24 — Phase 6: steady state
+
+Same 1M arXiv set through `examples/steady_state.rs` (before Phase 7's
+changes): ingest in 1,000-doc commits 849 s, commit p50 410 ms / p99 1.69 s,
+no commit waited for a graph build; writer reopen 2.17 s, reader open
+0.47 s; resident index 917 MB. Search p50 with a write buffer of 16K / 32K /
+64K chunks: 5.9 / 8.1 / 15.0 ms (1.1 ms with none). Searches during a
+background seal of 66.5K chunks: p50 87 ms (memory bandwidth shared with the
+build). Single-document commits, 1M docs: 48 ms shared, 26 ms exclusive.
+Hybrid search p50 27 ms; range filter over 50% of a unique numeric field
+p50 287 ms. See `docs/design/phase-6.md`.
+
 ## 2026-10-23 — Phase 5 gate: the whole database
 
 SIFT1M as one million single-chunk documents in a `.vdb` file, through the

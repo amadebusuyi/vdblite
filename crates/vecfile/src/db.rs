@@ -138,6 +138,60 @@ impl Drop for DbRef {
     }
 }
 
+/// Bytes of file pages the storage engine caches by default (on top of
+/// the operating system's own file cache). Measured on 1M 768-dim vectors,
+/// 256 MiB searches as fast as 1 GiB; 64 MiB is about 30% slower.
+pub const DEFAULT_CACHE_BYTES: usize = 256 << 20;
+
+/// How to open a database; see [`Db::open_with`].
+#[derive(Clone, Debug)]
+pub struct OpenOptions {
+    read_only: bool,
+    exclusive: bool,
+    cache_bytes: usize,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        OpenOptions {
+            read_only: false,
+            exclusive: false,
+            cache_bytes: DEFAULT_CACHE_BYTES,
+        }
+    }
+}
+
+impl OpenOptions {
+    /// Read and write, with reading processes allowed alongside, and the
+    /// default cache: what [`Db::open`] does.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Open read-only, alongside the writing process; see
+    /// [`Db::open_read_only`].
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    /// Shut every other process out; see [`Db::open_exclusive`].
+    pub fn exclusive(mut self, exclusive: bool) -> Self {
+        self.exclusive = exclusive;
+        self
+    }
+
+    /// Bytes of file pages to cache in this process (default
+    /// [`DEFAULT_CACHE_BYTES`]). The vector index is held in memory
+    /// separately; this cache serves documents, records and the vectors read
+    /// to re-rank results. The operating system caches the file too, so a
+    /// small cache mostly costs system calls, not disk reads.
+    pub fn cache_bytes(mut self, bytes: usize) -> Self {
+        self.cache_bytes = bytes;
+        self
+    }
+}
+
 /// How a process opens a file.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -149,8 +203,9 @@ enum Mode {
     ReadOnly,
 }
 
-fn builder(mode: Mode) -> redb::Builder {
+fn builder(mode: Mode, cache_bytes: usize) -> redb::Builder {
     let mut b = redb::Builder::new();
+    b.set_cache_size(cache_bytes);
     b.set_concurrency_mode(match mode {
         Mode::Exclusive => ConcurrencyMode::ExclusiveWriter,
         // One writing process, any number of reading ones.
@@ -168,8 +223,23 @@ impl Db {
     /// last committed transaction. A file written by an older version of
     /// vecfile is upgraded in place.
     pub fn open(path: impl AsRef<Path>) -> Result<Db> {
+        Self::open_with(path, &OpenOptions::new())
+    }
+
+    /// Opens the database at `path` as `options` say.
+    pub fn open_with(path: impl AsRef<Path>, options: &OpenOptions) -> Result<Db> {
+        let mode = match (options.read_only, options.exclusive) {
+            (false, false) => Mode::Shared,
+            (false, true) => Mode::Exclusive,
+            (true, false) => Mode::ReadOnly,
+            (true, true) => {
+                return Err(crate::error::invalid(
+                    "a read-only handle can't be exclusive",
+                ));
+            }
+        };
         let path = path.as_ref().to_path_buf();
-        crate::error::guard(|| Self::open_inner(path, Mode::Shared))
+        crate::error::guard(|| Self::open_inner(path, mode, options.cache_bytes))
     }
 
     /// Like [`Db::open`], but no other process may open the file, not even
@@ -177,8 +247,7 @@ impl Db {
     /// that keep reading processes safe, which roughly halves the latency of
     /// small commits.
     pub fn open_exclusive(path: impl AsRef<Path>) -> Result<Db> {
-        let path = path.as_ref().to_path_buf();
-        crate::error::guard(|| Self::open_inner(path, Mode::Exclusive))
+        Self::open_with(path, &OpenOptions::new().exclusive(true))
     }
 
     /// Opens an existing database for reading, alongside the process that
@@ -190,18 +259,17 @@ impl Db {
     /// closed cleanly. After a writer crash, opening it for writing again
     /// repairs it.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Db> {
-        let path = path.as_ref().to_path_buf();
-        crate::error::guard(|| Self::open_inner(path, Mode::ReadOnly))
+        Self::open_with(path, &OpenOptions::new().read_only(true))
     }
 
-    fn open_inner(path: PathBuf, mode: Mode) -> Result<Db> {
+    fn open_inner(path: PathBuf, mode: Mode, cache_bytes: usize) -> Result<Db> {
         let read_only = mode == Mode::ReadOnly;
         let store = if read_only {
-            let store = Store::Reader(builder(mode).open_read_only(&path)?);
+            let store = Store::Reader(builder(mode, cache_bytes).open_read_only(&path)?);
             check_version(&store)?;
             store
         } else {
-            let db = builder(mode).create(&path)?;
+            let db = builder(mode, cache_bytes).create(&path)?;
             init_settings(&db)?;
             Store::Writer(db)
         };

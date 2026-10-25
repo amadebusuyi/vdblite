@@ -48,7 +48,7 @@ mod schema;
 mod tx;
 
 pub use collection::{Agg, ChunkHit, Collection, DocHit, IndexStats, Passage, Search};
-pub use db::Db;
+pub use db::{DEFAULT_CACHE_BYTES, Db, OpenOptions};
 pub use doc::{ChunkInfo, Doc, DocInfo, Document, Embedder, Meta, MetaValue, Upserted};
 pub use error::{BoxError, Error, Result};
 pub use filter::{Field, Filter, meta};
