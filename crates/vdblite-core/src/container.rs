@@ -581,6 +581,21 @@ impl Container {
         Ok(())
     }
 
+    /// Releases every lock redb took, keeping this process's epoch lease so
+    /// regions still mapped stay protected from a writer reopening the file.
+    fn release_redb_locks(&self) -> io::Result<()> {
+        let mut ep = self.epochs.lock();
+        let released = StorageBackend::close(&self.file);
+        if let Some(h) = ep.held {
+            let (s, e) = byte(EPOCH_LOCK_BASE + h);
+            if self.file.lock_shared_range(s, e).is_err() {
+                // The next lease change takes the lock again.
+                ep.held = None;
+            }
+        }
+        released
+    }
+
     /// Whether space freed at epoch `freed_at` can be reused: no lease in
     /// this process, and no lock in any other, on an older epoch.
     pub fn reusable(&self, freed_at: u64) -> io::Result<bool> {
@@ -672,9 +687,10 @@ impl StorageBackend for RedbBackend {
     }
 
     fn close(&self) -> Result<(), io::Error> {
-        // The container outlives redb's handle (mapped regions), and closes
-        // the file when it goes; redb's locks are released here.
-        Ok(())
+        // The container outlives redb's handle (mapped regions), so the file
+        // closes only when the last of them goes; redb's locks are released
+        // here, or the file could not be reopened until then.
+        self.0.release_redb_locks()
     }
 
     fn try_lock_range(
