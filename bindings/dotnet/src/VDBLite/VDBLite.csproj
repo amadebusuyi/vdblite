@@ -18,7 +18,7 @@
     <Authors>Adebowale Adebusuyi</Authors>
     <Description>An embedded, single-file vector database: documents, chunking, HNSW search, filters and hybrid search in one file, no server.</Description>
     <PackageTags>vector-database;embedded;hnsw;semantic-search;embeddings;rag</PackageTags>
-    <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/OWNER/vdblite</PackageProjectUrl>
     <RepositoryUrl>https://github.com/OWNER/vdblite</RepositoryUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>

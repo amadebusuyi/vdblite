@@ -17,7 +17,7 @@ exclude = ["crates/vdblite-redb"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 authors = ["Adebowale Adebusuyi"]
 repository = "https://github.com/OWNER/vdblite"
 homepage = "https://github.com/OWNER/vdblite"
@@ -41,7 +41,7 @@ redb = { package = "vdblite-redb", path = "crates/vdblite-redb", version = "=4.4
 memmap2 = "0.9.11"
 zstd = "0.14"
 serde = { version = "1", features = ["derive"] }
-postcard = { version = "1.1", features = ["alloc"] }
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 bytemuck = "1.25"
 half = { version = "2.7.1", features = ["bytemuck"] }

@@ -2,7 +2,7 @@
   "name": "vdblite",
   "version": "0.1.0",
   "description": "Embedded, single-file vector database (Rust core) for Node.js",
-  "license": "MIT OR Apache-2.0",
+  "license": "Apache-2.0",
   "author": "Adebowale Adebusuyi",
   "repository": {
     "type": "git",
