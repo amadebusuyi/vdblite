@@ -15,10 +15,6 @@
   <url>https://github.com/OWNER/vdblite</url>
   <licenses>
     <license>
-      <name>MIT</name>
-      <url>https://opensource.org/licenses/MIT</url>
-    </license>
-    <license>
       <name>Apache-2.0</name>
       <url>https://www.apache.org/licenses/LICENSE-2.0</url>
     </license>

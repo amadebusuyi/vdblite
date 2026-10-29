@@ -2,7 +2,7 @@
 // (vdblite.h). Structured values are JSON strings in the same shapes as the
 // C API; parse them with the JSON library you already use.
 //
-// Licensed under MIT or Apache-2.0.
+// Licensed under Apache-2.0.
 #ifndef VDBLITE_HPP
 #define VDBLITE_HPP
 

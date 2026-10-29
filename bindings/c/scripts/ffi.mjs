@@ -126,7 +126,7 @@ if (cmd === 'dev') {
   const [platform, version, outDir] = rest
   if (!outDir) fail('usage: ffi.mjs archive <platform> <version> <out-dir>')
   const dist = path.join(root, 'target', 'ffi', platform)
-  for (const f of ['LICENSE-MIT', 'LICENSE-APACHE']) fs.copyFileSync(path.join(root, f), path.join(dist, f))
+  for (const f of ['LICENSE-APACHE']) fs.copyFileSync(path.join(root, f), path.join(dist, f))
   fs.copyFileSync(path.join(bindings, 'c', 'README.md'), path.join(dist, 'README.md'))
   // The archive unpacks into one folder named after it.
   const name = `vdblite-c-${version}-${platform}`

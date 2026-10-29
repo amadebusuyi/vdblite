@@ -15,7 +15,7 @@
  * - Handles are thread-safe. Freeing a handle must not race with other
  *   calls on it. Calls block; run them on your own threads.
  *
- * Licensed under MIT or Apache-2.0.
+ * Licensed under Apache-2.0.
  */
 #ifndef VDBLITE_H
 #define VDBLITE_H

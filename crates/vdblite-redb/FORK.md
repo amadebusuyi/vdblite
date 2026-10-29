@@ -21,5 +21,6 @@ The addition is the only difference from the published crate; the library
 is still named `redb`. It is offered upstream, and VDBLite will go back to
 the published crate once redb has it.
 
-Licensed, as redb is, under either of the MIT license (LICENSE-MIT) or the
-Apache License, Version 2.0 (LICENSE-APACHE), at your option.
+redb is licensed under either the MIT license or the Apache License,
+Version 2.0, at your option; this fork is used under the Apache License,
+Version 2.0 (LICENSE-APACHE). `xxh3.rs` keeps its own MIT notice in its header.

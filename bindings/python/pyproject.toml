@@ -7,7 +7,7 @@ build-backend = "maturin"
 name = "vdblite-py"
 description = "An embedded, single-file vector database"
 requires-python = ">=3.11"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 dynamic = ["version"]
 
 [tool.maturin]

@@ -507,7 +507,7 @@ jobs:
             exit 0
           fi
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          cp -R ../bindings/swift/Sources ../bindings/swift/Tests ../bindings/swift/README.md ../LICENSE-MIT ../LICENSE-APACHE .
+          cp -R ../bindings/swift/Sources ../bindings/swift/Tests ../bindings/swift/README.md ../LICENSE-APACHE .
           printf '.build/\n.swiftpm/\n' > .gitignore
           url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/CVDBLite.xcframework.zip"
           sed "s#.binaryTarget(name: \"CVDBLite\", path: \"CVDBLite.xcframework\")#.binaryTarget(name: \"CVDBLite\", url: \"$url\", checksum: \"$CHECKSUM\")#" \

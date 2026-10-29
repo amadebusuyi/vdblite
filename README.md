@@ -206,7 +206,6 @@ See [RELEASING.md](RELEASING.md) for the one-time setup.
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT) at your option. Unless you explicitly state
-otherwise, any contribution you submit for inclusion is dual licensed as
-above, without additional terms.
+Licensed under the [Apache License, Version 2.0](LICENSE-APACHE). Unless you
+explicitly state otherwise, any contribution you submit for inclusion is
+licensed as above, without additional terms.
