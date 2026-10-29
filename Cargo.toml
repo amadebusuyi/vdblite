@@ -41,7 +41,7 @@ redb = { package = "vdblite-redb", path = "crates/vdblite-redb", version = "=4.4
 memmap2 = "0.9.11"
 zstd = "0.14"
 serde = { version = "1", features = ["derive"] }
-postcard = { version = "1.1", features = ["alloc"] }
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 bytemuck = "1.25"
 half = { version = "2.7.1", features = ["bytemuck"] }
