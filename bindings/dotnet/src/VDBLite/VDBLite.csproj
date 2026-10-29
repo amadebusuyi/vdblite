@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>12</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Records document the parameters that need it, not every one. -->
+    <NoWarn>$(NoWarn);CS1573</NoWarn>
+    <RootNamespace>VDBLite</RootNamespace>
+
+    <PackageId>VDBLite</PackageId>
+    <!-- Kept equal to the workspace version by scripts/release/version.mjs. -->
+    <Version>0.1.0</Version>
+    <Authors>Adebowale Adebusuyi</Authors>
+    <Description>An embedded, single-file vector database: documents, chunking, HNSW search, filters and hybrid search in one file, no server.</Description>
+    <PackageTags>vector-database;embedded;hnsw;semantic-search;embeddings;rag</PackageTags>
+    <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/OWNER/vdblite</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/OWNER/vdblite</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <!-- Native libraries, from scripts/build-lib.sh or the release workflow:
+         runtimes/<rid>/native/{libvdblite.so,libvdblite.dylib,vdblite.dll}. -->
+    <None Include="../../runtimes/**/*" Pack="true" PackagePath="runtimes/" />
+  </ItemGroup>
+
+</Project>

@@ -2,7 +2,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use vecfile_chunk::{ChunkConfig, Format, chunk};
+use vdblite_chunk::{ChunkConfig, Format, chunk};
 
 fuzz_target!(|data: &[u8]| {
     let Some((&head, rest)) = data.split_first() else { return };

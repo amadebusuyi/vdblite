@@ -1,17 +1,18 @@
 # notes-search
 
 Semantic search over a folder of notes, docs or code, from the command line.
-It uses [vecfile](../../bindings/node) for storage and search and a local
+It uses [VDBLite](../../bindings/node) for storage and search and a local
 embedding model (all-MiniLM-L6-v2 via transformers.js), so there's no server,
 no API key, and everything lives in one file: `notes.vdb`.
 
 ## Setup
 
 ```sh
-# once: build the vecfile addon (needs Rust)
+# once: build the vdblite addon from this checkout (needs Rust)
 (cd ../../bindings/node && npm run build)
 
 npm install
+# outside this repo, depend on the published package instead: npm install vdblite
 ```
 
 The first index or search downloads the model (~90 MB) into `.model-cache/`.

@@ -1,4 +1,4 @@
-import vecfile from './index.js'
+import vdblite from './index.js'
 
-export const { open, Database, Collection } = vecfile
-export default vecfile
+export const { open, Database, Collection, BulkLoad, DEFAULT_CHECKPOINT } = vdblite
+export default vdblite

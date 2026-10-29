@@ -27,7 +27,7 @@ exposes aligned values) can be read in place.
 
 **Tables, keyed collection-first.** One set of tables serves every
 collection; each key starts with the collection's `u32` id (see
-`vecfile-core/src/tables.rs`). Dropping a collection is range deletes.
+`vdblite-core/src/tables.rs`). Dropping a collection is range deletes.
 
 **What is persisted vs rebuilt.** Persisted: documents, zstd blobs, chunk
 records, f32 vectors, the metadata index, sealed segments, tombstones (`dead`:
@@ -77,7 +77,7 @@ record decode is checked; corrupt data is `Error::Storage(Corrupt)`.
 - **Corruption:** copies of a real file with 1–8 flipped bits are opened,
   searched, read and scanned. redb itself panics on some of them (while
   loading allocator state at open, parsing pages, or flushing at close), so
-  vecfile catches panics at `Db::open`, every read entry point, and when the
+  VDBLite catches panics at `Db::open`, every read entry point, and when the
   handle is dropped, turning them into `Error::Storage`. CI runs 120 rounds
   with no escaped panic. A 1,000-round run found one file (about 1 in 400)
   where redb panics again inside a destructor while unwinding, which aborts
@@ -120,7 +120,7 @@ two rankings with Reciprocal Rank Fusion (k = 60). Each list contributes
   false`) are vector-only until `Collection::enable_lexical()` builds the index
   from stored text, with no re-embedding.
 - **Chunker versioning:** a document's content fingerprint is seeded with
-  `vecfile_chunk::VERSION`, so a chunker change re-chunks every document on its
+  `vdblite_chunk::VERSION`, so a chunker change re-chunks every document on its
   next write while unchanged chunks keep their vectors.
 
 ## Not in v1 (as the guide planned)

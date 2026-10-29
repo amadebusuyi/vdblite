@@ -10,7 +10,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { open } from 'vecfile'
+import { open } from 'vdblite'
 
 import { DIM, embed } from './embedder.js'
 

@@ -1,0 +1,33 @@
+[package]
+name = "vdblite-core"
+description = "Storage layer for VDBLite: table layout, records and codecs on redb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/vdblite-core"
+readme = "README.md"
+
+[dependencies]
+redb.workspace = true
+memmap2.workspace = true
+half.workspace = true
+parking_lot.workspace = true
+xxhash-rust.workspace = true
+serde.workspace = true
+postcard.workspace = true
+zstd.workspace = true
+roaring.workspace = true
+bytemuck.workspace = true
+vdblite-index.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

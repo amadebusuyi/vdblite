@@ -2,7 +2,7 @@
   "name": "notes-search",
   "version": "1.0.0",
   "private": true,
-  "description": "Semantic search over a folder of notes, using vecfile and a local embedding model",
+  "description": "Semantic search over a folder of notes, using vdblite and a local embedding model",
   "type": "module",
   "bin": {
     "notes": "./cli.js"
@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "4.3.1",
-    "vecfile": "file:../../bindings/node"
+    "vdblite": "file:../../bindings/node"
   },
   "overrides": {
     "onnxruntime-node": "1.22.0"

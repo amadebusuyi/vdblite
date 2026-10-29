@@ -1,0 +1,36 @@
+[package]
+name = "vdblite-index"
+description = "Distance kernels, HNSW and quantization for VDBLite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/vdblite-index"
+readme = "README.md"
+
+[dependencies]
+bytemuck.workspace = true
+half.workspace = true
+rayon.workspace = true
+parking_lot.workspace = true
+roaring.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "distance"
+harness = false
+
+[[bench]]
+name = "brute_force"
+harness = false
+
+[lints]
+workspace = true

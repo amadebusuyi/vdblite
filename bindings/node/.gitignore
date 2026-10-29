@@ -1,3 +1,4 @@
-vecfile.node
+vdblite.node
 node_modules
 *.tgz
+npm/

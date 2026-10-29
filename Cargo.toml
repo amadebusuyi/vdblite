@@ -1,33 +1,50 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/vecfile-core",
-    "crates/vecfile-index",
-    "crates/vecfile-chunk",
-    "crates/vecfile",
+    "crates/vdblite-core",
+    "crates/vdblite-index",
+    "crates/vdblite-chunk",
+    "crates/vdblite",
+    "bindings/shared",
     "bindings/node",
+    "bindings/c",
 ]
+# The redb fork is an upstream codebase, built as a dependency rather than
+# linted as one of ours.
+exclude = ["crates/vdblite-redb"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
+authors = ["Adebowale Adebusuyi"]
+repository = "https://github.com/OWNER/vdblite"
+homepage = "https://github.com/OWNER/vdblite"
+keywords = ["vector-database", "embedded", "hnsw", "semantic-search", "embeddings"]
+categories = ["database-implementations", "text-processing", "algorithms"]
 
+# Internal crates carry a version so they can be published; scripts/release/
+# version.mjs keeps it equal to the workspace version above.
 [workspace.dependencies]
-vecfile-core = { path = "crates/vecfile-core" }
-vecfile-index = { path = "crates/vecfile-index" }
-vecfile-chunk = { path = "crates/vecfile-chunk" }
+vdblite-core = { path = "crates/vdblite-core", version = "=0.1.0" }
+vdblite-index = { path = "crates/vdblite-index", version = "=0.1.0" }
+vdblite-chunk = { path = "crates/vdblite-chunk", version = "=0.1.0" }
 rayon = "1.12"
 libc = "0.2"
 parking_lot = "0.13"
 roaring = "0.11"
-redb = { version = "4.4", features = ["experimental-multiprocess"] }
+# redb 4.4.0 plus a read-only open on custom backends (crates/vdblite-redb,
+# FORK.md), used as `redb`. Multi-process readers rely on a redb feature
+# marked experimental.
+redb = { package = "vdblite-redb", path = "crates/vdblite-redb", version = "=4.4.0", features = ["experimental-multiprocess"] }
+memmap2 = "0.9.11"
 zstd = "0.14"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1.1", features = ["alloc"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 bytemuck = "1.25"
+half = { version = "2.7.1", features = ["bytemuck"] }
 tempfile = "3.27"
 proptest = "1.12"
 criterion = "0.8"
@@ -46,5 +63,10 @@ panic = "abort"
 # The Node addon must unwind so a panic becomes a JS exception instead of
 # aborting the host process.
 [profile.release-node]
+inherits = "release"
+panic = "unwind"
+
+# Likewise the C library (bindings/c), where a panic becomes an error code.
+[profile.release-ffi]
 inherits = "release"
 panic = "unwind"

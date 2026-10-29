@@ -1,7 +1,12 @@
-/target
+# Every Cargo target dir: the root workspace and the maturin-built bindings/python.
+target/
 /data
 *.vdb
 /fuzz/target
 /fuzz/corpus
 /fuzz/artifacts
 /fuzz/Cargo.lock
+/logs
+node_modules/
+# Test fixtures are .vdb files too.
+!crates/vdblite/tests/data/*.vdb

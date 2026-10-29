@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Embedded engines head to head: vecfile, Zvec, LanceDB and sqlite-vec, each
+# Embedded engines head to head: vdblite, Zvec, LanceDB and sqlite-vec, each
 # in the same Linux container image, one at a time. Per engine, a build
 # container loads and indexes the data; then a fresh search container drops
 # the page cache (hence --privileged) and measures. Databases live on a
@@ -9,18 +9,18 @@
 #   scripts/compare/embedded/run.sh sift-1000000 [engine ...]
 #   NO_BUILD=1 scripts/compare/embedded/run.sh arxiv768-500000   # same image again
 #
-# Engines: vecfile zvec lancedb-hnsw lancedb-ivfpq sqlite-vec (default: all).
+# Engines: vdblite zvec lancedb-hnsw lancedb-ivfpq sqlite-vec (default: all).
 # Results: target/compare/embedded/<dataset>/<engine>-{build,search}.json.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 
 DATASET=${1:?usage: run.sh DATASET [engine ...]}
 shift
-ENGINES=("${@:-vecfile zvec lancedb-hnsw lancedb-ivfpq sqlite-vec}")
+ENGINES=("${@:-vdblite zvec lancedb-hnsw lancedb-ivfpq sqlite-vec}")
 read -r -a ENGINES <<<"${ENGINES[*]}"
 [[ -f data/bench/$DATASET/meta.json ]] || { echo "no data/bench/$DATASET; run prep.py" >&2; exit 1; }
 
-IMAGE=vecfile-embedded-bench
+IMAGE=vdblite-embedded-bench
 VOLUME=bench-embedded-db
 OUT=target/compare/embedded/$DATASET
 mkdir -p "$OUT"
@@ -40,14 +40,15 @@ run() { # run <extra docker args...> -- <command...>
 
 for engine in "${ENGINES[@]}"; do
     case $engine in
-        vecfile) db=/db/vecfile.vdb ;;
+        vdblite) db=/db/vdblite.vdb ;;
         zvec | lancedb-hnsw | lancedb-ivfpq | sqlite-vec) db=/db/$engine ;;
         *) echo "unknown engine $engine" >&2; exit 1 ;;
     esac
     echo "== $engine on $DATASET"
-    run -- sh -c "rm -rf $db"
-    if [[ $engine == vecfile ]]; then
-        run -- ann_compare build --dataset "$DATASET" --db "$db" --out "/out/$engine-build.json"
+    run -- sh -c "rm -rf $db ${db%.vdb}.rows"
+    if [[ $engine == vdblite ]]; then
+        # Bulk-loaded in 10K batches, as bench.py loads the other engines.
+        run -- ann_compare build --bulk --dataset "$DATASET" --db "$db" --out "/out/$engine-build.json"
         search=(ann_compare search)
     else
         run -- python /bench/bench.py build "$engine" --dataset "$DATASET" --db "$db" --out "/out/$engine-build.json"
@@ -55,5 +56,5 @@ for engine in "${ENGINES[@]}"; do
     fi
     run --privileged -- sh -c 'sync && echo 3 > /proc/sys/vm/drop_caches && exec "$@"' sh \
         "${search[@]}" --dataset "$DATASET" --db "$db" --out "/out/$engine-search.json"
-    run -- sh -c "rm -rf $db"
+    run -- sh -c "rm -rf $db ${db%.vdb}.rows"
 done

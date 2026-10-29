@@ -4,7 +4,7 @@ Oct 23, 2026 · @Adebowale
 
 ## Goals and non-goals
 
-We are building a single-file, embedded vector database in Rust (working name `vecfile`). An app opens it like SQLite: `Db::open("notes.vdb")`, with no server. It stores documents like a regular database, splits large content into searchable chunks, and returns whole documents or the exact parts that matched.
+We are building a single-file, embedded vector database in Rust (working name `vdblite`). An app opens it like SQLite: `Db::open("notes.vdb")`, with no server. It stores documents like a regular database, splits large content into searchable chunks, and returns whole documents or the exact parts that matched.
 
 **Goals**
 
@@ -28,7 +28,7 @@ The system is one crate with four layers. Writes run left to right: chunk, embed
 
 &#91;embedded content: architecture · API, 3 services, 3 engines, 1 file\]
 
-The Embedder is dashed because it sits outside the core: callers pass vectors in, or plug in a model. Suggested workspace crates: `vecfile-core` (storage and WAL), `vecfile-index` (HNSW and quantization), `vecfile-chunk`, and `vecfile` (the public API).
+The Embedder is dashed because it sits outside the core: callers pass vectors in, or plug in a model. Suggested workspace crates: `vdblite-core` (storage and WAL), `vdblite-index` (HNSW and quantization), `vdblite-chunk`, and `vdblite` (the public API).
 
 ## Data model and public API
 

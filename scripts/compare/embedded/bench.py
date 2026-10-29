@@ -1,5 +1,5 @@
 """In-process vector search engines on a prepared dataset (see prep.py),
-measured the way ann_compare.rs measures vecfile. run.sh runs each phase in
+measured the way ann_compare.rs measures vdblite. run.sh runs each phase in
 its own container:
 
     bench.py build  <engine> --dataset DIR --db PATH --out build.json
@@ -12,7 +12,7 @@ id against exact ground truth, single-query latency, resident memory, and
 concurrent throughput.
 
 Engines: zvec, lancedb-hnsw (HNSW-SQ in one partition, configured like
-vecfile), lancedb-ivfpq (LanceDB's default index), sqlite-vec (exact scan).
+vdblite), lancedb-ivfpq (LanceDB's default index), sqlite-vec (exact scan).
 """
 
 import argparse
@@ -32,9 +32,9 @@ os.environ.setdefault("RUST_LOG", "error")
 
 K = 10
 BATCH = 10_000
-M, EF_CONSTRUCTION = 16, 200  # vecfile's defaults
-RERANK = 4  # vecfile re-ranks k x 4 candidates with f32
-# vecfile raises ef to at least k x 4 = 40 (and LanceDB requires ef >= k x
+M, EF_CONSTRUCTION = 16, 200  # vdblite's defaults
+RERANK = 4  # vdblite re-ranks k x 4 candidates with f32
+# vdblite raises ef to at least k x 4 = 40 (and LanceDB requires ef >= k x
 # refine), so every HNSW sweep starts there.
 EFS = [40, 64, 128, 256, 512]
 REF_EF = 64  # operating point for the cold pass and throughput
@@ -126,7 +126,7 @@ class LanceHnsw:
     def index_config(self):
         from lancedb.index import HnswSq
 
-        # One partition is one HNSW graph over everything, as in vecfile;
+        # One partition is one HNSW graph over everything, as in vdblite;
         # the LanceDB docs recommend it for HNSW indexes.
         return HnswSq(distance_type=self.metric, num_partitions=1, m=M, ef_construction=EF_CONSTRUCTION)
 

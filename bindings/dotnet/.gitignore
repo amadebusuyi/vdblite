@@ -1,0 +1,4 @@
+bin/
+obj/
+# Native libraries, from scripts/build-lib.sh or the release workflow.
+/runtimes/

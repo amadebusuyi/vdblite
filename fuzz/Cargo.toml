@@ -8,7 +8,7 @@
 # Kept out of the main workspace so stable builds never compile it.
 
 [package]
-name = "vecfile-fuzz"
+name = "vdblite-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -19,9 +19,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 tempfile = "3.27"
-vecfile = { path = "../crates/vecfile" }
-vecfile-chunk = { path = "../crates/vecfile-chunk" }
-vecfile-index = { path = "../crates/vecfile-index" }
+vdblite = { path = "../crates/vdblite" }
+vdblite-chunk = { path = "../crates/vdblite-chunk" }
+vdblite-index = { path = "../crates/vdblite-index" }
 
 [workspace]
 

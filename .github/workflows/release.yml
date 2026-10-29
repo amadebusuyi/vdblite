@@ -1,0 +1,624 @@
+# Publishes a release when a version tag is pushed:
+#
+#   node scripts/release/version.mjs bump 0.2.0   # then fill in CHANGELOG.md
+#   git commit -am "Release 0.2.0" && git tag v0.2.0 && git push --follow-tags
+#
+# Order: version check -> full CI -> prebuilt Node addons and C libraries
+# for every platform -> each tested on its platform (Node; C, C++, Go, Java,
+# .NET) -> crates.io, npm, Maven Central, NuGet and the Go module tag ->
+# GitHub release with the C archives and the Swift XCFramework -> the Swift
+# package -> install from the registries on clean machines. Publishing waits
+# for approval if the `release` environment has required reviewers.
+#
+# Every publish step skips versions already on the registry, so a failed
+# run can be re-run.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Libraries built on the runners also load on older macOS.
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
+
+jobs:
+  check:
+    name: check versions
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: node scripts/release/version.mjs check "$GITHUB_REF_NAME"
+      - id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: check
+    uses: ./.github/workflows/ci.yml
+
+  build-node:
+    name: build ${{ matrix.platform }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin-arm64, target: aarch64-apple-darwin, os: macos-14 }
+          - { platform: darwin-x64, target: x86_64-apple-darwin, os: macos-14 }
+          - { platform: linux-x64-gnu, target: x86_64-unknown-linux-gnu, os: ubuntu-latest, zig: true }
+          - { platform: linux-arm64-gnu, target: aarch64-unknown-linux-gnu, os: ubuntu-latest, zig: true }
+          - { platform: linux-x64-musl, target: x86_64-unknown-linux-musl, os: ubuntu-latest, zig: true }
+          - { platform: linux-arm64-musl, target: aarch64-unknown-linux-musl, os: ubuntu-latest, zig: true }
+          - { platform: win32-x64-msvc, target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { platform: win32-arm64-msvc, target: aarch64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - if: matrix.zig
+        run: pip install ziglang cargo-zigbuild
+      - run: node bindings/node/scripts/build.js --target ${{ matrix.target }} ${{ matrix.zig && '--zig' || '' }}
+      - name: Check glibc requirement
+        if: endsWith(matrix.platform, '-gnu')
+        run: |
+          max=$(readelf --dyn-syms -W bindings/node/npm/${{ matrix.platform }}/vdblite.node \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -uV | tail -1)
+          echo "needs $max"
+          [ "$(printf '%s\nGLIBC_2.28\n' "$max" | sort -V | tail -1)" = GLIBC_2.28 ]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: bindings/node/npm/${{ matrix.platform }}/vdblite.node
+          if-no-files-found: error
+
+  test-node:
+    name: test ${{ matrix.platform }}
+    needs: build-node
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin-arm64, os: macos-14 }
+          # Runs the x64 Node under Rosetta.
+          - { platform: darwin-x64, os: macos-14, arch: x64 }
+          - { platform: linux-x64-gnu, os: ubuntu-latest }
+          - { platform: linux-arm64-gnu, os: ubuntu-24.04-arm }
+          - { platform: linux-x64-musl, os: ubuntu-latest, alpine: true }
+          - { platform: linux-arm64-musl, os: ubuntu-24.04-arm, alpine: true }
+          - { platform: win32-x64-msvc, os: windows-latest }
+          - { platform: win32-arm64-msvc, os: windows-11-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: bindings/node
+      - if: '!matrix.alpine'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          architecture: ${{ matrix.arch }}
+      - if: '!matrix.alpine'
+        run: npm test
+        working-directory: bindings/node
+      - if: matrix.alpine
+        run: docker run --rm -v "$PWD/bindings/node:/pkg" -w /pkg node:22-alpine node --test "test/*.test.mjs"
+
+  # The C library, which the C/C++, Go, Java and .NET packages ship.
+  build-ffi:
+    name: build C library ${{ matrix.platform }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin-arm64, target: aarch64-apple-darwin, os: macos-14 }
+          - { platform: darwin-x64, target: x86_64-apple-darwin, os: macos-14 }
+          - { platform: linux-x64-gnu, target: x86_64-unknown-linux-gnu, os: ubuntu-latest, zig: true }
+          - { platform: linux-arm64-gnu, target: aarch64-unknown-linux-gnu, os: ubuntu-latest, zig: true }
+          - { platform: linux-x64-musl, target: x86_64-unknown-linux-musl, os: ubuntu-latest, zig: true }
+          - { platform: linux-arm64-musl, target: aarch64-unknown-linux-musl, os: ubuntu-latest, zig: true }
+          - { platform: win32-x64-msvc, target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { platform: win32-arm64-msvc, target: aarch64-pc-windows-msvc, os: windows-latest }
+          - { platform: win32-x64-gnu, target: x86_64-pc-windows-gnu, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.zig
+        run: pip install ziglang cargo-zigbuild
+      - run: node bindings/c/scripts/ffi.mjs build ${{ matrix.platform }} ${{ matrix.zig && '--zig' || '' }}
+      - name: Check glibc requirement
+        if: endsWith(matrix.platform, '-gnu') && startsWith(matrix.platform, 'linux')
+        run: |
+          max=$(readelf --dyn-syms -W target/ffi/${{ matrix.platform }}/lib/libvdblite.so \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -uV | tail -1)
+          echo "needs $max"
+          [ "$(printf '%s\nGLIBC_2.28\n' "$max" | sort -V | tail -1)" = GLIBC_2.28 ]
+      - run: node bindings/c/scripts/ffi.mjs archive ${{ matrix.platform }} ${{ needs.check.outputs.version }} dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffi-${{ matrix.platform }}
+          path: target/ffi/${{ matrix.platform }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: c-archive-${{ matrix.platform }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # Each language's tests against the release libraries, on the platform
+  # they were built for.
+  test-ffi:
+    name: test C library ${{ matrix.platform }}
+    needs: build-ffi
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin-arm64, os: macos-14, c: true, go: true, java: true, dotnet: true }
+          # Runs an x86_64 C program under Rosetta.
+          - { platform: darwin-x64, os: macos-14, c: true, arch: x86_64 }
+          - { platform: linux-x64-gnu, os: ubuntu-latest, c: true, go: true, java: true, dotnet: true }
+          - { platform: linux-arm64-gnu, os: ubuntu-24.04-arm, c: true, go: true, java: true, dotnet: true }
+          - { platform: linux-x64-musl, os: ubuntu-latest, alpine: true }
+          - { platform: win32-x64-msvc, os: windows-latest, java: true, dotnet: true }
+          - { platform: win32-arm64-msvc, os: windows-11-arm, java: true, dotnet: true }
+          - { platform: win32-x64-gnu, os: windows-latest, go: true }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffi-${{ matrix.platform }}
+          path: ffi/${{ matrix.platform }}
+      - run: node bindings/c/scripts/ffi.mjs place ffi
+      - name: C and C++
+        if: matrix.c
+        run: |
+          lib=ffi/${{ matrix.platform }}/lib inc=bindings/c/include
+          arch=${{ matrix.arch && format('-arch {0}', matrix.arch) || '' }}
+          case "$RUNNER_OS" in macOS) sys="-liconv -lm" ;; *) sys="-lpthread -ldl -lm" ;; esac
+          cc $arch -std=c11 -Wall -Werror -I"$inc" bindings/c/tests/test.c "$lib/libvdblite.a" $sys -o test_c
+          c++ $arch -std=c++17 -Wall -Werror -I"$inc" bindings/c/tests/test.cpp -L"$lib" -lvdblite -Wl,-rpath,"$PWD/$lib" -o test_cpp
+          ./test_c "$RUNNER_TEMP" && ./test_cpp "$RUNNER_TEMP"
+      - if: matrix.go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+      - if: matrix.go
+        run: go test -count=1 ./...
+        working-directory: bindings/go
+      - if: matrix.java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # Temurin builds Windows on Arm from Java 21.
+          java-version: ${{ matrix.platform == 'win32-arm64-msvc' && '21' || '17' }}
+      - if: matrix.java
+        run: mvn -B -q test
+        working-directory: bindings/java
+      - if: matrix.dotnet
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - if: matrix.dotnet
+        run: dotnet test tests/VDBLite.Tests
+        working-directory: bindings/dotnet
+      - if: matrix.alpine
+        name: .NET on Alpine
+        run: |
+          docker run --rm -v "$PWD/bindings/dotnet:/src" -w /src mcr.microsoft.com/dotnet/sdk:8.0-alpine \
+            dotnet test tests/VDBLite.Tests
+
+  build-swift:
+    name: build Swift XCFramework
+    needs: check
+    runs-on: macos-15
+    outputs:
+      checksum: ${{ steps.zip.outputs.checksum }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+      - id: zip
+        run: |
+          bindings/swift/scripts/build-xcframework.sh --zip | tee build.log
+          echo "checksum=$(sed -n 's/^checksum: //p' build.log)" >> "$GITHUB_OUTPUT"
+      - run: swift test
+        working-directory: bindings/swift
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swift-xcframework
+          path: bindings/swift/CVDBLite.xcframework.zip
+          if-no-files-found: error
+
+  publish-crates:
+    name: publish to crates.io
+    needs: [check, ci, test-node, test-ffi, build-swift]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # Trusted publishing (no stored token) once it is set up on crates.io
+      # for each crate; until then the CARGO_REGISTRY_TOKEN secret is used.
+      - id: auth
+        if: env.CARGO_REGISTRY_TOKEN == ''
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish in dependency order
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          OIDC_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          export CARGO_REGISTRY_TOKEN="${CARGO_REGISTRY_TOKEN:-$OIDC_TOKEN}"
+          published() {
+            curl -sf -A "vdblite-release (github actions)" "https://crates.io/api/v1/crates/$1/$2" > /dev/null
+          }
+          # The redb fork has its own version and sits outside the workspace;
+          # vdblite-core needs it on crates.io first.
+          fork=crates/vdblite-redb/Cargo.toml
+          fork_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$fork" | head -1)
+          if published vdblite-redb "$fork_version"; then
+            echo "vdblite-redb $fork_version is already published"
+          else
+            cargo publish --manifest-path "$fork"
+          fi
+          for crate in vdblite-chunk vdblite-index vdblite-core vdblite; do
+            if published "$crate" "$VERSION"; then
+              echo "$crate $VERSION is already published"
+            else
+              cargo publish --locked -p "$crate"
+            fi
+          done
+
+  publish-npm:
+    name: publish to npm
+    needs: [check, ci, test-node, test-ffi, build-swift]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or newer.
+      - run: npm install -g npm@11
+      # One folder per platform artifact: npm/<platform>/vdblite.node.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '{darwin,linux,win32}-*'
+          path: bindings/node/npm
+      - run: node scripts/prepublish.js
+        working-directory: bindings/node
+      - name: Publish platform packages, then vdblite
+        working-directory: bindings/node
+        env:
+          # Used until trusted publishing is set up for each package on npm.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          publish() {
+            name=$(node -p "require('./$1/package.json').name")
+            if npm view "$name@$VERSION" version > /dev/null 2>&1; then
+              echo "$name $VERSION is already published"
+            else
+              (cd "$1" && npm publish --provenance --access public)
+            fi
+          }
+          for dir in npm/*/; do publish "${dir%/}"; done
+          publish .
+
+  publish-maven:
+    name: publish to Maven Central
+    needs: [check, ci, test-node, test-ffi, build-swift]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ffi-*
+          path: ffi
+      # Strips the ffi- prefix: ffi/<platform>/lib.
+      - run: for d in ffi/ffi-*; do mv "$d" "ffi/${d#ffi/ffi-}"; done && node bindings/c/scripts/ffi.mjs place ffi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          server-id: central
+          server-username: MAVEN_USERNAME
+          server-password: MAVEN_PASSWORD
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+      - name: Publish unless already published
+        working-directory: bindings/java
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          MAVEN_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_PASSWORD: ${{ secrets.MAVEN_CENTRAL_TOKEN }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: |
+          group=$(sed -n 's|^  <groupId>\(.*\)</groupId>|\1|p' pom.xml | head -1)
+          url="https://repo1.maven.org/maven2/${group//.//}/vdblite/$VERSION/vdblite-$VERSION.pom"
+          if curl -sfI "$url" > /dev/null; then
+            echo "$group:vdblite:$VERSION is already published"
+          else
+            mvn -B -P release deploy
+          fi
+
+  publish-nuget:
+    name: publish to NuGet
+    needs: [check, ci, test-node, test-ffi, build-swift]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ffi-*
+          path: ffi
+      - run: for d in ffi/ffi-*; do mv "$d" "ffi/${d#ffi/ffi-}"; done && node bindings/c/scripts/ffi.mjs place ffi
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      # Trusted publishing (no stored key) once it is set up on nuget.org;
+      # until then the NUGET_API_KEY secret is used.
+      - id: login
+        if: env.NUGET_API_KEY == ''
+        uses: NuGet/login@v1
+        with:
+          user: ${{ vars.NUGET_USER }}
+      - name: Pack and push
+        working-directory: bindings/dotnet
+        env:
+          OIDC_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: |
+          dotnet pack src/VDBLite -c Release -o out
+          dotnet nuget push "out/*.nupkg" --api-key "${NUGET_API_KEY:-$OIDC_KEY}" \
+            --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+  # Go modules are fetched from tags. The module's tag points at a commit
+  # (on no branch) that adds the prebuilt static libraries, so `go get`
+  # needs no Rust and main stays free of binaries.
+  publish-go:
+    name: tag the Go module
+    needs: [check, ci, test-node, test-ffi, build-swift]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    env:
+      TAG: bindings/go/v${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ffi-*
+          path: ffi
+      - run: for d in ffi/ffi-*; do mv "$d" "ffi/${d#ffi/ffi-}"; done && node bindings/c/scripts/ffi.mjs place ffi
+      - name: Commit the libraries and push the tag
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then
+            echo "$TAG already exists"
+            exit 0
+          fi
+          for p in darwin_arm64 darwin_amd64 linux_amd64 linux_arm64 windows_amd64; do
+            test -f "bindings/go/lib/$p/libvdblite.a"
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --detach
+          git add -f bindings/go/lib
+          git commit -q -m "Go module $TAG with prebuilt libraries"
+          git tag "$TAG"
+          git push origin "refs/tags/$TAG"
+
+  github-release:
+    name: GitHub release
+    needs: [check, publish-crates, publish-npm, publish-maven, publish-nuget, publish-go]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - run: node scripts/release/version.mjs notes "${{ needs.check.outputs.version }}" > notes.md
+      # The C/C++ archives and the XCFramework the Swift package downloads.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: c-archive-*
+          path: assets
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: swift-xcframework
+          path: assets
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --verify-tag --title "VDBLite $GITHUB_REF_NAME" --notes-file notes.md
+          gh release upload "$GITHUB_REF_NAME" assets/* --clobber
+
+  # SwiftPM reads Package.swift from the root of a repository, at a version
+  # tag, and that file must name the XCFramework's checksum. So the package
+  # lives in its own repository, <owner>/vdblite-swift: this job copies
+  # bindings/swift there with the download URL and checksum filled in, and
+  # tags it.
+  publish-swift:
+    name: publish the Swift package
+    needs: [check, build-swift, github-release]
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      CHECKSUM: ${{ needs.build-swift.outputs.checksum }}
+      SWIFT_REPO: ${{ vars.SWIFT_REPO || format('{0}/vdblite-swift', github.repository_owner) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SWIFT_REPO }}
+          ssh-key: ${{ secrets.SWIFT_DEPLOY_KEY }}
+          path: swift-repo
+          fetch-depth: 0
+      - name: Update, commit and tag
+        working-directory: swift-repo
+        run: |
+          if git rev-parse -q --verify "refs/tags/v$VERSION" > /dev/null; then
+            echo "v$VERSION already exists in $SWIFT_REPO"
+            exit 0
+          fi
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R ../bindings/swift/Sources ../bindings/swift/Tests ../bindings/swift/README.md ../LICENSE-MIT ../LICENSE-APACHE .
+          printf '.build/\n.swiftpm/\n' > .gitignore
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/CVDBLite.xcframework.zip"
+          sed "s#.binaryTarget(name: \"CVDBLite\", path: \"CVDBLite.xcframework\")#.binaryTarget(name: \"CVDBLite\", url: \"$url\", checksum: \"$CHECKSUM\")#" \
+            ../bindings/swift/Package.swift > Package.swift
+          grep -q "checksum: \"$CHECKSUM\"" Package.swift
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "VDBLite $VERSION (from $GITHUB_REPOSITORY@$GITHUB_SHA)"
+          git tag "v$VERSION"
+          git push origin HEAD "refs/tags/v$VERSION"
+
+  # Installs what was just published the way a user would: no Rust, no checkout.
+  smoke-npm:
+    name: npm install on ${{ matrix.name }}
+    needs: [check, publish-npm]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS arm64, os: macos-14 }
+          - { name: Linux x64, os: ubuntu-latest }
+          - { name: Linux arm64, os: ubuntu-24.04-arm }
+          - { name: Windows x64, os: windows-latest }
+          - { name: Alpine x64, os: ubuntu-latest, image: 'node:22-alpine' }
+          - { name: Debian 10 (glibc 2.28), os: ubuntu-latest, image: 'node:18-buster' }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: scripts/release
+      - if: '!matrix.image'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install and search
+        run: |
+          mkdir -p "$RUNNER_TEMP/app" && cp scripts/release/smoke.mjs "$RUNNER_TEMP/app/"
+          cd "$RUNNER_TEMP/app"
+          cmd='npm init -y > /dev/null && for i in 1 2 3 4 5 6; do npm install "vdblite@$VERSION" && break; sleep 20; done && node smoke.mjs'
+          if [ -n "${{ matrix.image }}" ]; then
+            docker run --rm -e VERSION -v "$PWD:/app" -w /app "${{ matrix.image }}" sh -c "$cmd"
+          else
+            sh -c "$cmd"
+          fi
+
+  smoke-cargo:
+    name: cargo add vdblite
+    needs: [check, publish-crates]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build a program against the published crate
+        run: |
+          cargo new --quiet "$RUNNER_TEMP/app" && cd "$RUNNER_TEMP/app"
+          for i in 1 2 3 4 5 6; do cargo add "vdblite@=$VERSION" && break; sleep 20; done
+          cat > src/main.rs <<'EOF'
+          fn main() {
+              let path = std::env::temp_dir().join("smoke.vdb");
+              let db = vdblite::Db::open(&path).expect("open");
+              drop(db);
+              println!("opened {}", path.display());
+          }
+          EOF
+          cargo run --quiet
+
+  # The other languages, from their registries, with no Rust and no checkout.
+  smoke-langs:
+    name: install ${{ matrix.lang }} on ${{ matrix.os }}
+    needs: [check, publish-maven, publish-nuget, publish-go, publish-swift]
+    strategy:
+      fail-fast: false
+      matrix:
+        lang: [go, java, dotnet]
+        os: [ubuntu-latest, macos-14, windows-latest]
+        include:
+          - { lang: swift, os: macos-15 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      SWIFT_REPO: ${{ vars.SWIFT_REPO }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            scripts/release
+            bindings/java/pom.xml
+            bindings/go/go.mod
+      - if: matrix.lang == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+      - if: matrix.lang == 'java'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - if: matrix.lang == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Install and search
+        run: scripts/release/smoke-lang.sh ${{ matrix.lang }}

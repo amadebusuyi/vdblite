@@ -1,0 +1,19 @@
+# Only the Rust sources, the Python binding and the bench client go into the
+# build context.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!bindings/python/Cargo.toml
+!bindings/python/Cargo.lock
+!bindings/python/pyproject.toml
+!bindings/python/src/
+!bindings/python/README.md
+!bindings/node/Cargo.toml
+!bindings/node/build.rs
+!bindings/node/src/
+!fuzz/Cargo.toml
+!scripts/vectordbbench/vdblite/
+!scripts/vectordbbench/register.py
+crates/**/target
+**/__pycache__

@@ -1,8 +1,17 @@
 {
-  "name": "vecfile",
+  "name": "vdblite",
   "version": "0.1.0",
   "description": "Embedded, single-file vector database (Rust core) for Node.js",
   "license": "MIT OR Apache-2.0",
+  "author": "Adebowale Adebusuyi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/vdblite.git",
+    "directory": "bindings/node"
+  },
+  "homepage": "https://github.com/OWNER/vdblite/tree/main/bindings/node#readme",
+  "bugs": "https://github.com/OWNER/vdblite/issues",
+  "keywords": ["vector-database", "embedded", "hnsw", "semantic-search", "embeddings", "rag", "hybrid-search"],
   "main": "index.js",
   "types": "index.d.ts",
   "exports": {
@@ -12,7 +21,7 @@
       "require": "./index.js"
     }
   },
-  "files": ["index.js", "index.mjs", "index.d.ts", "vecfile.node"],
+  "files": ["index.js", "index.mjs", "index.d.ts"],
   "engines": { "node": ">=18" },
   "scripts": {
     "build": "node scripts/build.js",

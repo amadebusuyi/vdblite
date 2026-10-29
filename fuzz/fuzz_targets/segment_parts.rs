@@ -3,9 +3,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use vecfile_index::Metric;
-use vecfile_index::hnsw::GraphParts;
-use vecfile_index::segment::{SealedSegment, SearchParams, SegmentParts, SegmentScratch};
+use vdblite_index::Metric;
+use vdblite_index::hnsw::GraphParts;
+use vdblite_index::segment::{SealedSegment, SearchParams, SegmentParts, SegmentScratch};
 
 fn take<'a>(data: &mut &'a [u8], n: usize) -> &'a [u8] {
     let n = n.min(data.len());

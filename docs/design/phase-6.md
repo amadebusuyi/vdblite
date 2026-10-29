@@ -88,7 +88,7 @@ flushes) on every open.
 
 **Limits.**
 
-- redb marks multi-process support experimental. vecfile's own tests cover
+- redb marks multi-process support experimental. VDBLite's own tests cover
   readers in the same process and in another one, including the writer
   being killed and a new writer recovering the file while a reader stays
   open.
@@ -108,7 +108,7 @@ segments load in parallel.
 
 ## Steady-state benchmark
 
-`crates/vecfile/examples/steady_state.rs` measures what an application sees
+`crates/vdblite/examples/steady_state.rs` measures what an application sees
 while writing and searching at once, through the public API: commit latency
 during bulk ingest, open time and resident memory, search on the index as
 background maintenance left it and after `optimize` (recall against exact

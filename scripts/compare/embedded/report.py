@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 OUT = ROOT / "target/compare/embedded"
-ENGINES = ["vecfile", "zvec", "lancedb-hnsw", "lancedb-ivfpq", "sqlite-vec"]
+ENGINES = ["vdblite", "zvec", "lancedb-hnsw", "lancedb-ivfpq", "sqlite-vec"]
 TARGETS = [0.95, 0.99]
 
 
@@ -65,13 +65,20 @@ def table(dataset):
             *[f"p50 / p99 at recall ≥ {t}" for t in TARGETS], f"QPS, {s['qps']['threads']} threads", "Floor p50"]
     lines = [f"### {dataset}", "", "| " + " | ".join(head) + " |", "|" + " --- |" * len(head)]
     lines += ["| " + " | ".join(r) + " |" for r in rows]
+    notes = []
+    vf = load(dataset, "vdblite")
+    if vf and "hydrated" in vf[1]:
+        h = vf[1]["hydrated"]
+        notes = ["", f"vdblite with hydration (text + metadata read per hit), {knob(h['knob'])}: "
+                 f"recall {h['recall']:.3f}, p50 {ms(h['p50_us'])}, p99 {ms(h['p99_us'])}, "
+                 f"{h['qps']:,.0f} QPS on {vf[1]['qps']['threads']} threads. Every other row returns ids only."]
     sweeps = ["", "Full sweeps (recall@10, p50, p99):", ""]
     for e in ENGINES:
         r = load(dataset, e)
         if r:
             pts = "; ".join(f"{knob(w['knob'])}: {w['recall']:.4f}, {ms(w['p50_us'])}, {ms(w['p99_us'])}" for w in r[1]["warm"])
             sweeps.append(f"- {e}: {pts}")
-    return "\n".join(lines + sweeps) + "\n"
+    return "\n".join(lines + notes + sweeps) + "\n"
 
 
 if __name__ == "__main__":

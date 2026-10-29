@@ -1,20 +1,51 @@
 'use strict'
 
-// vecfile for Node.js: an embedded, single-file vector database.
-// The native addon (vecfile.node) does the work; this file adds embedding
+// vdblite for Node.js: an embedded, single-file vector database.
+// The native addon (vdblite.node) does the work; this file adds embedding
 // functions, transactions and batching on top.
 
+const fs = require('node:fs')
 const path = require('node:path')
 
-let native
-try {
-  native = require(path.join(__dirname, 'vecfile.node'))
-} catch (e) {
-  throw new Error(
-    `vecfile: native addon not found or failed to load (${e.message}). ` +
-      `Build it with \`npm run build\` in ${__dirname}.`,
-  )
+/** Whether this Linux runs on musl (Alpine) rather than glibc. */
+function isMusl() {
+  try {
+    return !process.report.getReport().header.glibcVersionRuntime
+  } catch {
+    try {
+      return fs.readFileSync('/usr/bin/ldd', 'utf8').includes('musl')
+    } catch {
+      return false
+    }
+  }
 }
+
+/** The `@vdblite/<name>` package that holds the prebuilt addon for this machine. */
+function platformPackage() {
+  const { platform, arch } = process
+  if (platform === 'linux') return `@vdblite/linux-${arch}-${isMusl() ? 'musl' : 'gnu'}`
+  if (platform === 'win32') return `@vdblite/win32-${arch}-msvc`
+  return `@vdblite/${platform}-${arch}`
+}
+
+// A local build (`npm run build` in a checkout) wins over the prebuilt package.
+function loadNative() {
+  const local = path.join(__dirname, 'vdblite.node')
+  if (fs.existsSync(local)) return require(local)
+  const pkg = platformPackage()
+  try {
+    return require(pkg)
+  } catch (e) {
+    if (e.code !== 'MODULE_NOT_FOUND') throw e
+    throw new Error(
+      `vdblite: no prebuilt addon for ${process.platform}-${process.arch} (looked for ${pkg}). ` +
+        `If npm skipped optional dependencies, reinstall without --no-optional / --omit=optional. ` +
+        `Otherwise build from source: install Rust (https://rustup.rs) and run \`npm run build\` in ${__dirname}.`,
+    )
+  }
+}
+
+const native = loadNative()
 
 /** Native errors arrive as "CODE: message"; expose the code as err.code. */
 function fixError(e) {
@@ -201,7 +232,7 @@ class Database {
       const nativeOps = await this._prepare(final)
       try {
         const out = await call(() => this._inner.write(nativeOps))
-        if (out.warning) process.emitWarning(out.warning, { code: 'VECFILE_MAINTENANCE' })
+        if (out.warning) process.emitWarning(out.warning, { code: 'VDBLITE_MAINTENANCE' })
         return { value, results: out.results }
       } catch (e) {
         // A document changed between planning and writing: plan again.
@@ -317,6 +348,16 @@ class Collection {
     return call(() => this._inner.count())
   }
 
+  /**
+   * Starts a bulk load, the fastest way to fill a collection: documents
+   * added with `load.add(docs, embed)` are indexed once, with every core, by
+   * `await load.finish()`. Until then they can be read but not searched.
+   * One bulk load per collection runs at a time.
+   */
+  bulkLoad(options) {
+    return new BulkLoad(this, callSync(() => this._inner.bulkLoad(options ?? null)))
+  }
+
   /** The best-matching chunks. Options: { k = 10, ef, filter }. */
   async search(query, options) {
     return call(() => this._inner.search(toF32(query, 'the query'), options))
@@ -376,8 +417,58 @@ class Collection {
 /** Opens (or creates) a database file. */
 /** Opens (or creates) a database file. `options.cacheBytes` sets the page
  * cache size. */
+/** A bulk load in progress; see `Collection.bulkLoad`. */
+class BulkLoad {
+  constructor(collection, inner) {
+    this.collection = collection
+    this._inner = inner
+  }
+
+  get finished() {
+    return this._inner.finished
+  }
+
+  /**
+   * Inserts or replaces documents in one transaction; resolves to how many
+   * were written. `embed` embeds every chunk; without it, each document
+   * needs `vectors`, one per chunk (see `embedInputs`). Batches of thousands
+   * of documents per call load fastest.
+   */
+  async add(docs, embed) {
+    const items = docs.map((d) => ({ ...docInput(d), vectors: d.vectors }))
+    if (embed !== undefined) {
+      if (typeof embed !== 'function') throw new TypeError('add needs an embed function, or vectors on each document')
+      const inputs = items.map((it) => this.collection.embedInputs(it.content, it.format))
+      const vectors = await runEmbedder(embed, inputs.flat())
+      let i = 0
+      items.forEach((it, j) => {
+        it.vectors = vectors.slice(i, (i += inputs[j].length))
+      })
+    } else {
+      for (const it of items) {
+        if (!Array.isArray(it.vectors)) {
+          throw new TypeError(`document ${JSON.stringify(it.key)} needs vectors (one per chunk), or pass an embed function`)
+        }
+        it.vectors = it.vectors.map((v) => toF32(v, 'a vector'))
+      }
+    }
+    return call(() => this._inner.add(items))
+  }
+
+  /** Makes everything added so far durable. Only needed with `openExclusive`,
+   * where batches otherwise commit durably every `checkpointEvery` chunks. */
+  async checkpoint() {
+    await call(() => this._inner.checkpoint())
+  }
+
+  /** Builds the index over everything added and makes it searchable. */
+  async finish() {
+    await call(() => this._inner.finish())
+  }
+}
+
 function open(path, options) {
   return Database.open(path, options)
 }
 
-module.exports = { open, Database, Collection }
+module.exports = { open, Database, Collection, BulkLoad, DEFAULT_CHECKPOINT: native.DEFAULT_CHECKPOINT }

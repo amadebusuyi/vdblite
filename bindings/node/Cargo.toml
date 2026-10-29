@@ -1,6 +1,6 @@
 [package]
-name = "vecfile-node"
-description = "Node.js bindings for vecfile"
+name = "vdblite-node"
+description = "Node.js bindings for vdblite"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,8 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-vecfile = { path = "../../crates/vecfile" }
+vdblite = { path = "../../crates/vdblite" }
+vdblite-bindings = { path = "../shared" }
 napi = { version = "3", features = ["napi8", "serde-json"] }
 napi-derive = "3"
 serde_json = "1"

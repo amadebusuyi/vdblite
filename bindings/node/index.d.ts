@@ -21,8 +21,13 @@ export interface CollectionOptions {
   dim: number
   /** Default "cosine". */
   metric?: 'cosine' | 'dot' | 'l2'
-  /** Default "int8" (about 4x less memory); "none" keeps f32 vectors in memory. */
-  quantization?: 'int8' | 'none'
+  /**
+   * Default "int8": the graph walk uses int8 codes and re-ranks from f16
+   * vectors. "binary" walks 1-bit codes (an eighth of int8's size) and
+   * re-ranks more candidates from f16. "none" walks full f32 vectors. Either
+   * way the vectors are memory-mapped from the file.
+   */
+  quantization?: 'int8' | 'binary' | 'none'
   /** Default { kind: "structural", targetTokens: 400, overlapTokens: 50 }. */
   chunking?: { kind?: 'structural' | 'none'; targetTokens?: number; overlapTokens?: number }
   /** Chunks buffered before they're sealed into a graph. Default 65536. */
@@ -164,7 +169,7 @@ export interface CollectionInfo {
   name: string
   dim: number
   metric: 'cosine' | 'dot' | 'l2'
-  quantization: 'int8' | 'none'
+  quantization: 'int8' | 'binary' | 'none'
   chunking: 'structural' | 'none'
   targetTokens?: number
   overlapTokens?: number
@@ -173,6 +178,20 @@ export interface CollectionInfo {
 export interface OpenOptions {
   /** Bytes of file pages to cache in this process (default 256 MiB). */
   cacheBytes?: number
+}
+
+export interface BulkLoadOptions {
+  /**
+   * Chunks between durable commits when the file was opened with
+   * `openExclusive` (default `DEFAULT_CHECKPOINT`, 1,000,000). A crash loses
+   * at most this much of the load. Otherwise every `add` commits durably.
+   */
+  checkpointEvery?: number
+}
+
+/** A document for `BulkLoad.add`, optionally with one vector per chunk. */
+export interface BulkDocInput extends DocInput {
+  vectors?: Vector[]
 }
 
 export interface IndexStats {
@@ -186,7 +205,7 @@ export interface IndexStats {
 
 /** Errors carry `code`: STORAGE, DIMENSION, COLLECTION_EXISTS, NO_SUCH_COLLECTION,
  * INVALID_ARGUMENT, EMBEDDER, STALE_EMBEDDINGS, VERSION, MAINTENANCE, READ_ONLY, CLOSED. */
-export interface VecfileError extends Error {
+export interface VdbliteError extends Error {
   code?: string
 }
 
@@ -232,6 +251,12 @@ export declare class Collection {
   chunks(key: string): Promise<ChunkInfo[]>
   scan(filter?: Filter): Promise<DocInfo[]>
   count(): Promise<number>
+  /**
+   * Starts a bulk load: added documents are readable at once and searchable
+   * after `finish()`, which builds the index once with every core. One bulk
+   * load per collection at a time (a second fails with INVALID_ARGUMENT).
+   */
+  bulkLoad(options?: BulkLoadOptions): BulkLoad
   search(query: Vector, options?: SearchOptions): Promise<ChunkHit[]>
   searchDocuments(query: Vector, options?: SearchOptions & { agg?: 'max' | 'sum'; top?: number }): Promise<DocHit[]>
   searchExpand(query: Vector, options?: SearchOptions & { neighbors?: number }): Promise<Passage[]>
@@ -241,5 +266,31 @@ export declare class Collection {
   searchText(text: string, embed: Embedder, options: SearchOptions & { mode: 'documents'; agg?: 'max' | 'sum'; top?: number; hybrid?: boolean }): Promise<DocHit[]>
   searchText(text: string, embed: Embedder, options: SearchOptions & { mode: 'expand' | 'sections'; neighbors?: number; hybrid?: boolean }): Promise<Passage[]>
 }
+
+/**
+ * A bulk load in progress. If it is never finished, what was added is kept
+ * and indexed by background maintenance; after a crash, every committed
+ * `add` is kept and indexed at the next open.
+ */
+export declare class BulkLoad {
+  readonly collection: Collection
+  readonly finished: boolean
+  /**
+   * Inserts or replaces documents in one transaction; resolves to how many
+   * were written. `embed` embeds every chunk; without it, each document
+   * needs `vectors`, one per chunk (see `Collection.embedInputs`).
+   */
+  add(docs: BulkDocInput[], embed?: Embedder): Promise<number>
+  /** Makes everything added so far durable (only matters with `openExclusive`). */
+  checkpoint(): Promise<void>
+  /**
+   * Builds the index over everything added and makes it searchable. Other
+   * writes to the database wait until it's done; reads and searches don't.
+   */
+  finish(): Promise<void>
+}
+
+/** Chunks between durable commits of a bulk load, by default (1,000,000). */
+export declare const DEFAULT_CHECKPOINT: number
 
 export declare function open(path: string, options?: OpenOptions): Database

@@ -1,4 +1,4 @@
-//! Node.js bindings for vecfile (napi-rs).
+//! Node.js bindings for vdblite (napi-rs).
 //!
 //! This is the native layer; `index.js` wraps it with the friendlier API
 //! (embedding functions, transactions, retries). Anything that touches the
@@ -9,37 +9,18 @@
 //! turns into `err.code`.
 
 use std::collections::HashMap;
-use std::ops::Bound;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use serde_json::{Number, Value, json};
-use vecfile::{
-    Agg, ChunkHit, Chunking, Db, Doc, Filter, HnswParams, IndexOptions, MetaValue, Metric,
-    OpenOptions, Passage, Quant, Schema,
-};
+use serde_json::{Value, json};
+use vdblite::{Agg, Chunking, Db, Doc, Filter, OpenOptions};
+use vdblite_bindings as shared;
 
 // ---------------------------------------------------------------- errors
 
-fn code_of(e: &vecfile::Error) -> &'static str {
-    use vecfile::Error as E;
-    match e {
-        E::Storage(_) => "STORAGE",
-        E::Dimension { .. } => "DIMENSION",
-        E::CollectionExists(_) => "COLLECTION_EXISTS",
-        E::NoSuchCollection(_) => "NO_SUCH_COLLECTION",
-        E::InvalidArgument(_) => "INVALID_ARGUMENT",
-        E::Embedder(_) => "EMBEDDER",
-        E::StaleEmbeddings { .. } => "STALE_EMBEDDINGS",
-        E::Version { .. } => "VERSION",
-        E::Maintenance(_) => "MAINTENANCE",
-        E::ReadOnly => "READ_ONLY",
-    }
-}
-
-fn to_napi(e: vecfile::Error) -> napi::Error {
-    napi::Error::from_reason(format!("{}: {e}", code_of(&e)))
+fn to_napi(e: vdblite::Error) -> napi::Error {
+    napi::Error::from_reason(format!("{}: {e}", shared::code_of(&e)))
 }
 
 fn invalid(msg: impl std::fmt::Display) -> napi::Error {
@@ -50,139 +31,19 @@ trait OrNapi<T> {
     fn or_napi(self) -> Result<T>;
 }
 
-impl<T> OrNapi<T> for std::result::Result<T, vecfile::Error> {
+impl<T> OrNapi<T> for std::result::Result<T, vdblite::Error> {
     fn or_napi(self) -> Result<T> {
         self.map_err(to_napi)
     }
 }
 
-// ---------------------------------------------------------------- JSON <-> metadata
+// ---------------------------------------------------------------- JSON
 
-fn meta_from_json(v: &Value, field: &str) -> Result<MetaValue> {
-    Ok(match v {
-        Value::Null => MetaValue::Null,
-        Value::Bool(b) => MetaValue::Bool(*b),
-        Value::Number(n) => match n.as_i64() {
-            Some(i) => MetaValue::Int(i),
-            None => MetaValue::Float(n.as_f64().unwrap_or(f64::NAN)),
-        },
-        Value::String(s) => MetaValue::Str(s.clone()),
-        Value::Array(items) => MetaValue::List(
-            items
-                .iter()
-                .map(|x| match x {
-                    Value::Array(_) | Value::Object(_) => Err(invalid(format!(
-                        "metadata field {field:?}: lists may only hold scalars"
-                    ))),
-                    x => meta_from_json(x, field),
-                })
-                .collect::<Result<_>>()?,
-        ),
-        Value::Object(_) => {
-            return Err(invalid(format!(
-                "metadata field {field:?}: nested objects are not supported"
-            )));
-        }
-    })
-}
+// Metadata, filters and result shapes are shared with the C ABI
+// (bindings/shared), so every language speaks the same JSON.
 
-fn meta_to_json(v: &MetaValue) -> Value {
-    match v {
-        MetaValue::Null => Value::Null,
-        MetaValue::Bool(b) => Value::Bool(*b),
-        MetaValue::Int(i) => json!(i),
-        MetaValue::Float(f) => Number::from_f64(*f).map_or(Value::Null, Value::Number),
-        MetaValue::Str(s) => Value::String(s.clone()),
-        MetaValue::List(items) => Value::Array(items.iter().map(meta_to_json).collect()),
-    }
-}
-
-fn meta_map_to_json(m: &vecfile::Meta) -> Value {
-    Value::Object(
-        m.iter()
-            .map(|(k, v)| (k.clone(), meta_to_json(v)))
-            .collect(),
-    )
-}
-
-/// Parses a Mongo-style filter:
-/// `{ lang: "en", n: { $gte: 1, $lt: 5 }, tags: { $in: ["a"] }, $or: [...], $not: {...} }`.
 fn parse_filter(v: &Value) -> Result<Filter> {
-    let Value::Object(map) = v else {
-        return Err(invalid("a filter must be an object"));
-    };
-    let mut parts = Vec::new();
-    for (key, cond) in map {
-        let list = |what: &str| -> Result<Vec<Filter>> {
-            match cond {
-                Value::Array(items) => items.iter().map(parse_filter).collect(),
-                _ => Err(invalid(format!("{what} takes an array of filters"))),
-            }
-        };
-        parts.push(match key.as_str() {
-            "$and" => Filter::And(list("$and")?),
-            "$or" => Filter::Or(list("$or")?),
-            "$not" => !parse_filter(cond)?,
-            k if k.starts_with('$') => return Err(invalid(format!("unknown operator {k}"))),
-            field => parse_condition(field, cond)?,
-        });
-    }
-    Ok(match parts.len() {
-        1 => parts.pop().expect("one part"),
-        _ => Filter::And(parts),
-    })
-}
-
-fn parse_condition(field: &str, cond: &Value) -> Result<Filter> {
-    let Value::Object(ops) = cond else {
-        return Ok(match cond {
-            Value::Array(_) => Filter::In(field.into(), scalars(field, cond)?),
-            v => Filter::Eq(field.into(), meta_from_json(v, field)?),
-        });
-    };
-    let num = |op: &str, v: &Value| {
-        v.as_f64()
-            .ok_or_else(|| invalid(format!("{field}.{op} needs a number")))
-    };
-    let mut parts = Vec::new();
-    let (mut lo, mut hi) = (Bound::Unbounded, Bound::Unbounded);
-    for (op, v) in ops {
-        match op.as_str() {
-            "$eq" => parts.push(Filter::Eq(field.into(), meta_from_json(v, field)?)),
-            "$ne" => parts.push(!Filter::Eq(field.into(), meta_from_json(v, field)?)),
-            "$in" => parts.push(Filter::In(field.into(), scalars(field, v)?)),
-            "$nin" => parts.push(!Filter::In(field.into(), scalars(field, v)?)),
-            "$gt" => lo = Bound::Excluded(num(op, v)?),
-            "$gte" => lo = Bound::Included(num(op, v)?),
-            "$lt" => hi = Bound::Excluded(num(op, v)?),
-            "$lte" => hi = Bound::Included(num(op, v)?),
-            "$exists" => match v.as_bool() {
-                Some(true) => parts.push(Filter::Exists(field.into())),
-                Some(false) => parts.push(!Filter::Exists(field.into())),
-                None => return Err(invalid(format!("{field}.$exists needs true or false"))),
-            },
-            other => return Err(invalid(format!("unknown operator {other} on {field:?}"))),
-        }
-    }
-    if !matches!((lo, hi), (Bound::Unbounded, Bound::Unbounded)) {
-        parts.push(Filter::Range {
-            field: field.into(),
-            lo,
-            hi,
-        });
-    }
-    match parts.len() {
-        0 => Err(invalid(format!("empty condition on {field:?}"))),
-        1 => Ok(parts.pop().expect("one part")),
-        _ => Ok(Filter::And(parts)),
-    }
-}
-
-fn scalars(field: &str, v: &Value) -> Result<Vec<MetaValue>> {
-    match v {
-        Value::Array(items) => items.iter().map(|x| meta_from_json(x, field)).collect(),
-        _ => Err(invalid(format!("{field}: $in/$nin need an array"))),
-    }
+    shared::parse_filter(v).map_err(invalid)
 }
 
 // ---------------------------------------------------------------- input types
@@ -200,7 +61,8 @@ pub struct CollectionOptions {
     pub dim: u32,
     /// "cosine" (default), "dot" or "l2".
     pub metric: Option<String>,
-    /// "int8" (default) or "none" (full f32 vectors in memory).
+    /// "int8" (default: int8 graph walk, f16 re-ranking), "binary" (1-bit
+    /// graph walk, f16 re-ranking) or "none" (f32).
     pub quantization: Option<String>,
     pub chunking: Option<ChunkingOptions>,
     pub seal_threshold: Option<u32>,
@@ -238,6 +100,23 @@ pub struct WriteOp {
     pub embeddings: Option<Vec<PlannedVector>>,
     /// One vector per chunk, in order (bypasses chunk reuse).
     pub vectors: Option<Vec<Float32Array>>,
+}
+
+#[napi(object)]
+pub struct BulkLoadOptions {
+    /// Chunks between durable commits in a file opened with
+    /// `openExclusive` (default `DEFAULT_CHECKPOINT`).
+    pub checkpoint_every: Option<f64>,
+}
+
+#[napi(object)]
+pub struct BulkDoc {
+    pub key: String,
+    pub content: String,
+    pub meta: Option<Value>,
+    pub format: Option<String>,
+    /// One vector per chunk, in order.
+    pub vectors: Vec<Float32Array>,
 }
 
 #[napi(object)]
@@ -282,62 +161,10 @@ fn doc_from_input(
     meta: Option<&Value>,
     format: Option<String>,
 ) -> Result<Doc> {
-    let mut doc = Doc::new(key).content(content);
-    if let Some(f) = format {
-        doc = doc.format(f);
-    }
-    match meta {
-        None | Some(Value::Null) => {}
-        Some(Value::Object(m)) => {
-            for (k, v) in m {
-                doc = doc.meta(k.clone(), meta_from_json(v, k)?);
-            }
-        }
-        Some(_) => return Err(invalid("meta must be an object")),
-    }
-    Ok(doc)
-}
-
-fn parse_hash(h: &str) -> Result<u64> {
-    u64::from_str_radix(h, 16).map_err(|_| invalid(format!("invalid chunk hash {h:?}")))
-}
-
-fn hash_str(h: u64) -> String {
-    format!("{h:016x}")
+    shared::doc_from_input(key, content, meta, format).map_err(invalid)
 }
 
 // ---------------------------------------------------------------- output JSON
-
-fn chunk_hit_json(h: &ChunkHit) -> Value {
-    json!({
-        "key": h.key,
-        "docId": h.doc_id,
-        "chunkId": h.chunk_id,
-        "ordinal": h.ordinal,
-        "byteStart": h.range.start,
-        "byteEnd": h.range.end,
-        "score": h.score,
-        "vectorScore": h.vector_score,
-        "lexicalScore": h.lexical_score,
-        "text": h.text,
-        "headingPath": h.heading_path,
-        "meta": meta_map_to_json(&h.meta),
-    })
-}
-
-fn passage_json(p: &Passage) -> Value {
-    json!({
-        "key": p.key,
-        "docId": p.doc_id,
-        "byteStart": p.range.start,
-        "byteEnd": p.range.end,
-        "score": p.score,
-        "text": p.text,
-        "ordinals": [p.ordinals.start, p.ordinals.end],
-        "headingPath": p.heading_path,
-        "meta": meta_map_to_json(&p.meta),
-    })
-}
 
 /// A JSON result handed to JavaScript as a plain value (task results need
 /// `TypeName`, which `serde_json::Value` lacks).
@@ -372,7 +199,7 @@ fn db_of(shared: &Shared) -> Result<Db> {
         .ok_or_else(|| napi::Error::from_reason("CLOSED: the database is closed"))
 }
 
-/// An open vecfile database file.
+/// An open vdblite database file.
 #[napi]
 pub struct Database {
     db: Shared,
@@ -457,53 +284,22 @@ impl Database {
         name: String,
         options: CollectionOptions,
     ) -> Result<Collection> {
-        let metric = match options.metric.as_deref().unwrap_or("cosine") {
-            "cosine" => Metric::Cosine,
-            "dot" => Metric::Dot,
-            "l2" => Metric::L2,
-            m => return Err(invalid(format!("unknown metric {m:?} (cosine, dot, l2)"))),
-        };
-        let quant = match options.quantization.as_deref().unwrap_or("int8") {
-            "int8" => Quant::Int8,
-            "none" => Quant::None,
-            q => return Err(invalid(format!("unknown quantization {q:?} (int8, none)"))),
-        };
-        let chunking = match &options.chunking {
-            None => Chunking::default(),
-            Some(c) => match c.kind.as_deref().unwrap_or("structural") {
-                "none" => Chunking::None,
-                "structural" => Chunking::Structural {
-                    target_tokens: c.target_tokens.unwrap_or(400) as usize,
-                    overlap_tokens: c.overlap_tokens.unwrap_or(50) as usize,
-                },
-                k => {
-                    return Err(invalid(format!(
-                        "unknown chunking {k:?} (structural, none)"
-                    )));
-                }
-            },
-        };
-        let defaults = HnswParams::default();
-        let opts = IndexOptions {
-            hnsw: HnswParams {
-                m: options.m.map_or(defaults.m, |v| v as usize),
-                ef_construction: options
-                    .ef_construction
-                    .map_or(defaults.ef_construction, |v| v as usize),
-                ef_search: options.ef_search.map_or(defaults.ef_search, |v| v as usize),
-                ..defaults
-            },
-            seal_threshold: options
-                .seal_threshold
-                .map_or(IndexOptions::default().seal_threshold, |v| v as usize),
-            lexical: options.lexical.unwrap_or(true),
-        };
-        let schema = Schema {
+        let chunking = options.chunking.as_ref();
+        let (schema, opts) = shared::CollectionOptions {
             dim: options.dim as usize,
-            metric,
-            quant,
-            chunking,
-        };
+            metric: options.metric.as_deref(),
+            quantization: options.quantization.as_deref(),
+            chunking: chunking.and_then(|c| c.kind.as_deref()),
+            target_tokens: chunking.and_then(|c| c.target_tokens).map(|v| v as usize),
+            overlap_tokens: chunking.and_then(|c| c.overlap_tokens).map(|v| v as usize),
+            seal_threshold: options.seal_threshold.map(|v| v as usize),
+            lexical: options.lexical,
+            m: options.m.map(|v| v as usize),
+            ef_construction: options.ef_construction.map(|v| v as usize),
+            ef_search: options.ef_search.map(|v| v as usize),
+        }
+        .build()
+        .map_err(invalid)?;
         db_of(&self.db)?
             .create_collection_with(&name, schema, opts)
             .or_napi()?;
@@ -549,7 +345,12 @@ impl Database {
                         let vectors = match (o.embeddings, o.vectors) {
                             (Some(e), None) => Vectors::ByHash(
                                 e.into_iter()
-                                    .map(|p| Ok((parse_hash(&p.hash)?, p.vector.to_vec())))
+                                    .map(|p| {
+                                        Ok((
+                                            shared::parse_hash(&p.hash).map_err(invalid)?,
+                                            p.vector.to_vec(),
+                                        ))
+                                    })
                                     .collect::<Result<_>>()?,
                             ),
                             (None, Some(v)) => {
@@ -623,7 +424,7 @@ impl Task for WriteTask {
     type JsValue = Json;
 
     fn compute(&mut self) -> Result<Value> {
-        let mut colls: HashMap<String, vecfile::Collection> = HashMap::new();
+        let mut colls: HashMap<String, vdblite::Collection> = HashMap::new();
         let mut tx = self.db.begin_write().or_napi()?;
         let mut results = Vec::with_capacity(self.ops.len());
         for op in std::mem::take(&mut self.ops) {
@@ -637,7 +438,7 @@ impl Task for WriteTask {
             results.push(match op {
                 Op::Delete { key, .. } => {
                     let deleted = tx.delete(coll, &key).or_napi()?;
-                    json!({ "op": "delete", "collection": name, "key": key, "deleted": deleted })
+                    shared::deleted_json(&name, &key, deleted)
                 }
                 Op::Upsert { doc, vectors, .. } => {
                     let key = doc.key().to_owned();
@@ -646,11 +447,7 @@ impl Task for WriteTask {
                         Vectors::Given(v) => tx.upsert_with_vectors(coll, doc, v),
                     }
                     .or_napi()?;
-                    json!({
-                        "op": "upsert", "collection": name, "key": key, "docId": up.doc_id,
-                        "version": up.version, "chunks": up.chunks, "embedded": up.embedded,
-                        "changed": up.changed,
-                    })
+                    shared::upserted_json(&name, &key, &up)
                 }
             });
         }
@@ -658,7 +455,7 @@ impl Task for WriteTask {
             Ok(()) => Value::Null,
             // The data is committed; only sealing an oversized write buffer
             // afterwards failed.
-            Err(e @ vecfile::Error::Maintenance(_)) => Value::String(e.to_string()),
+            Err(e @ vdblite::Error::Maintenance(_)) => Value::String(e.to_string()),
             Err(e) => return Err(to_napi(e)),
         };
         Ok(json!({ "results": results, "warning": warning }))
@@ -737,7 +534,7 @@ enum Mode {
 }
 
 pub struct ReadTask {
-    coll: vecfile::Collection,
+    coll: vdblite::Collection,
     read: Option<Read>,
 }
 
@@ -748,14 +545,15 @@ impl Task for ReadTask {
     fn compute(&mut self) -> Result<Value> {
         let c = &self.coll;
         Ok(match self.read.take().expect("computed once") {
-            Read::Plan(doc) => Value::Array(
-                c.plan_embeddings(&doc)
-                    .or_napi()?
-                    .into_iter()
-                    .map(|(h, text)| json!({ "hash": hash_str(h), "text": text }))
-                    .collect(),
-            ),
-            Read::Search { query, k, ef, filter, text, mode } => {
+            Read::Plan(doc) => shared::plan_json(&c.plan_embeddings(&doc).or_napi()?),
+            Read::Search {
+                query,
+                k,
+                ef,
+                filter,
+                text,
+                mode,
+            } => {
                 let mut s = c.search(&query).k(k);
                 if let Some(t) = text {
                     s = s.text(t);
@@ -767,56 +565,53 @@ impl Task for ReadTask {
                     s = s.filter(f);
                 }
                 match mode {
-                    Mode::Chunks => Value::Array(s.chunks().or_napi()?.iter().map(chunk_hit_json).collect()),
-                    Mode::Expand(n) => Value::Array(s.expand(n).or_napi()?.iter().map(passage_json).collect()),
-                    Mode::Sections => Value::Array(s.section().or_napi()?.iter().map(passage_json).collect()),
+                    Mode::Chunks => Value::Array(
+                        s.chunks()
+                            .or_napi()?
+                            .iter()
+                            .map(shared::chunk_hit_json)
+                            .collect(),
+                    ),
+                    Mode::Expand(n) => Value::Array(
+                        s.expand(n)
+                            .or_napi()?
+                            .iter()
+                            .map(shared::passage_json)
+                            .collect(),
+                    ),
+                    Mode::Sections => Value::Array(
+                        s.section()
+                            .or_napi()?
+                            .iter()
+                            .map(shared::passage_json)
+                            .collect(),
+                    ),
                     Mode::Documents(agg) => Value::Array(
                         s.documents(agg)
                             .or_napi()?
                             .iter()
-                            .map(|d| {
-                                json!({
-                                    "key": d.key, "docId": d.doc_id, "score": d.score,
-                                    "meta": meta_map_to_json(&d.meta),
-                                    "chunks": d.chunks.iter().map(chunk_hit_json).collect::<Vec<_>>(),
-                                })
-                            })
+                            .map(shared::doc_hit_json)
                             .collect(),
                     ),
                 }
             }
-            Read::Get(key) => match c.get(&key).or_napi()? {
-                None => Value::Null,
-                Some(d) => json!({
-                    "key": d.key, "docId": d.id, "content": d.content, "meta": meta_map_to_json(&d.meta),
-                    "version": d.version, "createdMs": d.created_ms, "updatedMs": d.updated_ms,
-                    "format": d.format, "chunkCount": d.chunk_count,
-                }),
-            },
+            Read::Get(key) => c
+                .get(&key)
+                .or_napi()?
+                .as_ref()
+                .map_or(Value::Null, shared::document_json),
             Read::Chunks(key) => Value::Array(
                 c.chunks(&key)
                     .or_napi()?
                     .iter()
-                    .map(|ch| {
-                        json!({
-                            "chunkId": ch.chunk_id, "ordinal": ch.ordinal, "byteStart": ch.range.start,
-                            "byteEnd": ch.range.end, "overlapStart": ch.overlap_start,
-                            "headingPath": ch.heading_path, "tokens": ch.tokens,
-                        })
-                    })
+                    .map(shared::chunk_info_json)
                     .collect(),
             ),
             Read::Scan(filter) => Value::Array(
                 c.scan(filter.as_ref())
                     .or_napi()?
                     .iter()
-                    .map(|d| {
-                        json!({
-                            "key": d.key, "docId": d.id, "meta": meta_map_to_json(&d.meta),
-                            "version": d.version, "createdMs": d.created_ms, "updatedMs": d.updated_ms,
-                            "contentLength": d.content_len, "chunkCount": d.chunk_count,
-                        })
-                    })
+                    .map(shared::doc_info_json)
                     .collect(),
             ),
             Read::Count => json!(c.len().or_napi()?),
@@ -831,7 +626,7 @@ impl Task for ReadTask {
 
 #[napi]
 impl Collection {
-    fn handle(&self) -> Result<vecfile::Collection> {
+    fn handle(&self) -> Result<vdblite::Collection> {
         db_of(&self.db)?.collection(&self.name).or_napi()
     }
 
@@ -904,18 +699,8 @@ impl Collection {
         Ok(CollectionInfo {
             name: self.name.clone(),
             dim: s.dim as u32,
-            metric: match s.metric {
-                Metric::Cosine => "cosine",
-                Metric::Dot => "dot",
-                Metric::L2 => "l2",
-            }
-            .into(),
-            quantization: if s.quant == Quant::None {
-                "none"
-            } else {
-                "int8"
-            }
-            .into(),
+            metric: shared::metric_name(s.metric).into(),
+            quantization: shared::quant_name(s.quant).into(),
             chunking: chunking.into(),
             target_tokens: target,
             overlap_tokens: overlap,
@@ -965,11 +750,7 @@ impl Collection {
         agg: Option<String>,
         top: Option<u32>,
     ) -> Result<AsyncTask<ReadTask>> {
-        let agg = match agg.as_deref().unwrap_or("max") {
-            "max" => Agg::MaxSim,
-            "sum" => Agg::SumTop(top.unwrap_or(3) as usize),
-            a => return Err(invalid(format!("unknown agg {a:?} (max, sum)"))),
-        };
+        let agg = shared::agg(agg.as_deref(), top.map(|t| t as usize)).map_err(invalid)?;
         self.search_task(query, options, Mode::Documents(agg))
     }
 
@@ -1014,5 +795,131 @@ impl Collection {
     #[napi(ts_return_type = "Promise<number>")]
     pub fn count(&self) -> Result<AsyncTask<ReadTask>> {
         self.task(Read::Count)
+    }
+
+    /// Starts a bulk load; one per collection runs at a time.
+    #[napi]
+    pub fn bulk_load(&self, options: Option<BulkLoadOptions>) -> Result<BulkLoad> {
+        let mut load = db_of(&self.db)?.bulk_load(&self.handle()?).or_napi()?;
+        if let Some(n) = options.and_then(|o| o.checkpoint_every) {
+            if !(n.is_finite() && n >= 1.0) {
+                return Err(invalid(
+                    "checkpointEvery must be a positive number of chunks",
+                ));
+            }
+            load = load.checkpoint_every(n as usize);
+        }
+        Ok(BulkLoad {
+            load: Arc::new(Mutex::new(Some(load))),
+        })
+    }
+}
+
+// ---------------------------------------------------------------- bulk load
+
+/// Chunks between durable commits of a bulk load, by default.
+#[napi]
+pub const DEFAULT_CHECKPOINT: u32 = vdblite::DEFAULT_CHECKPOINT as u32;
+
+/// A bulk load in progress (see `Collection.bulkLoad`).
+#[napi]
+pub struct BulkLoad {
+    /// `None` once finished.
+    load: Arc<Mutex<Option<vdblite::BulkLoad>>>,
+}
+
+enum BulkStep {
+    Add(Vec<(Doc, Vec<Vec<f32>>)>),
+    Checkpoint,
+    Finish,
+}
+
+pub struct BulkTask {
+    load: Arc<Mutex<Option<vdblite::BulkLoad>>>,
+    step: Option<BulkStep>,
+}
+
+impl Task for BulkTask {
+    type Output = u32;
+    type JsValue = u32;
+
+    fn compute(&mut self) -> Result<u32> {
+        let finished = || invalid("the bulk load has finished");
+        let mut guard = self.load.lock().unwrap_or_else(|e| e.into_inner());
+        match self.step.take().expect("computed once") {
+            BulkStep::Add(docs) => {
+                let load = guard.as_mut().ok_or_else(finished)?;
+                Ok(load.add(docs).or_napi()? as u32)
+            }
+            BulkStep::Checkpoint => {
+                guard
+                    .as_mut()
+                    .ok_or_else(finished)?
+                    .checkpoint()
+                    .or_napi()?;
+                Ok(0)
+            }
+            BulkStep::Finish => {
+                let load = guard.take().ok_or_else(finished)?;
+                drop(guard);
+                load.finish().or_napi()?;
+                Ok(0)
+            }
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: u32) -> Result<u32> {
+        Ok(output)
+    }
+}
+
+#[napi]
+impl BulkLoad {
+    fn task(&self, step: BulkStep) -> AsyncTask<BulkTask> {
+        AsyncTask::new(BulkTask {
+            load: self.load.clone(),
+            step: Some(step),
+        })
+    }
+
+    /// Adds documents in one transaction; resolves to how many were written.
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn add(&self, docs: Vec<BulkDoc>) -> Result<AsyncTask<BulkTask>> {
+        let docs = docs
+            .into_iter()
+            .map(|d| {
+                let vectors = d.vectors.iter().map(|v| v.to_vec()).collect();
+                Ok((
+                    doc_from_input(d.key, d.content, d.meta.as_ref(), d.format)?,
+                    vectors,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self.task(BulkStep::Add(docs)))
+    }
+
+    /// Makes everything added so far durable.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn checkpoint(&self) -> AsyncTask<BulkTask> {
+        self.task(BulkStep::Checkpoint)
+    }
+
+    /// Builds the index over everything added, with every core, and makes it
+    /// searchable.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn finish(&self) -> AsyncTask<BulkTask> {
+        self.task(BulkStep::Finish)
+    }
+
+    /// Whether `finish` has been called.
+    #[napi(getter)]
+    pub fn finished(&self) -> bool {
+        // Never wait on the event loop: a held lock means an add or
+        // checkpoint is running, so the load hasn't finished.
+        match self.load.try_lock() {
+            Ok(g) => g.is_none(),
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().is_none(),
+            Err(std::sync::TryLockError::WouldBlock) => false,
+        }
     }
 }

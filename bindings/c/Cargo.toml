@@ -1,0 +1,24 @@
+[package]
+name = "vdblite-c"
+description = "C ABI for vdblite, used by the C/C++, Go, Java, .NET and Swift bindings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "vdblite"
+# A shared library for Java, .NET and C/C++, a static one for Go and Swift.
+crate-type = ["cdylib", "staticlib"]
+# Documented by include/vdblite.h; rustdoc would also collide with the
+# vdblite crate's docs.
+doc = false
+
+[dependencies]
+vdblite = { path = "../../crates/vdblite" }
+vdblite-bindings = { path = "../shared" }
+serde_json = "1"
+
+[lints]
+workspace = true

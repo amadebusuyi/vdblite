@@ -1,0 +1,36 @@
+[package]
+name = "vdblite"
+description = "An embedded, single-file vector database: documents, structural chunking, hybrid search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/vdblite"
+readme = "../../README.md"
+
+[dependencies]
+vdblite-core.workspace = true
+vdblite-index.workspace = true
+vdblite-chunk.workspace = true
+redb.workspace = true
+roaring.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+xxhash-rust.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+vdblite-core.workspace = true
+proptest.workspace = true
+vdblite-index.workspace = true
+
+[lints]
+workspace = true

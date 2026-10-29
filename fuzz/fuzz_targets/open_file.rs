@@ -3,7 +3,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use vecfile::Db;
+use vdblite::Db;
 
 fuzz_target!(|data: &[u8]| {
     let dir = tempfile::tempdir().unwrap();

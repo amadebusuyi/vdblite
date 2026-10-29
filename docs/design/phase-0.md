@@ -15,7 +15,7 @@ cosine cost the same as dot instead of three accumulations.
 
 **Kernel dispatch.** A `Kernels` struct of function pointers is chosen once
 (`OnceLock`) from runtime CPU detection: AVX2+FMA on x86_64, NEON on aarch64,
-scalar otherwise. `VECFILE_KERNELS=scalar` forces the fallback. Hot loops
+scalar otherwise. `VDBLITE_KERNELS=scalar` forces the fallback. Hot loops
 fetch `kernels()` once and call through the pointers. A SIMD set can only be
 obtained after detection succeeds, so the pointers are safe to call.
 AVX-512 is left for later: this dev machine lacks it, so it couldn't be tested here.

@@ -8,7 +8,7 @@
 # ]
 # ///
 """SIFT1M against a vector database server, measured the way sift_db.rs
-measures vecfile: the first 1,000 queries, k=10, recall@10 by id against the
+measures vdblite: the first 1,000 queries, k=10, recall@10 by id against the
 published ground truth, single-query latency over a warm pass, then
 concurrent throughput at ef=64.
 
@@ -103,7 +103,7 @@ class Qdrant:
         m = self.m
         params = m.SearchParams(hnsw_ef=self.ef)
         if self.a.quant == "int8":
-            # Re-rank 4 x k candidates with f32, as vecfile does.
+            # Re-rank 4 x k candidates with f32, as vdblite does.
             params.quantization = m.QuantizationSearchParams(rescore=True, oversampling=4.0)
         res = self.c.query_points(
             name, query=q.tolist(), limit=K, search_params=params, with_payload=False

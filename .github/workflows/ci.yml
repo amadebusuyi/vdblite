@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs the whole suite before publishing anything.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,8 +17,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu runs the AVX2 kernels, macos-14 (Apple silicon) the NEON ones.
-        os: [ubuntu-latest, macos-14]
+        # x64 runners take the AVX2 kernels, the arm64 ones (Apple silicon,
+        # Linux arm64) the NEON ones.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -30,14 +33,57 @@ jobs:
       - name: Test scalar fallback
         run: cargo test --workspace --release
         env:
-          VECFILE_KERNELS: scalar
+          VDBLITE_KERNELS: scalar
+
+  msrv:
+    name: MSRV (1.95)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.95
+      - uses: Swatinem/rust-cache@v2
+      # The published crates only; dev-dependencies may need a newer Rust.
+      - run: cargo check --locked -p vdblite -p vdblite-core -p vdblite-index -p vdblite-chunk
+
+  package:
+    name: package and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: node scripts/release/version.mjs check
+      # Builds each crate from its packaged .crate file, in publish order.
+      # vdblite-core and vdblite can only be packaged once the redb fork they
+      # depend on is on crates.io, as it sits outside the workspace.
+      - name: Publish dry run
+        run: |
+          cargo publish --dry-run --manifest-path crates/vdblite-redb/Cargo.toml
+          fork_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/vdblite-redb/Cargo.toml | head -1)
+          if curl -sf -A "vdblite-ci (github actions)" \
+              "https://crates.io/api/v1/crates/vdblite-redb/$fork_version" > /dev/null; then
+            cargo publish --workspace --dry-run
+          else
+            echo "::notice::vdblite-redb $fork_version is not on crates.io yet; skipping vdblite-core and vdblite"
+            cargo publish --dry-run -p vdblite-chunk -p vdblite-index
+          fi
+      - run: cargo doc --workspace --no-deps --exclude vdblite-node
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  deny:
+    name: licenses and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
 
   node:
     name: node bindings (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -50,6 +96,93 @@ jobs:
         working-directory: bindings/node
       - run: npm test
         working-directory: bindings/node
+
+  node-musl:
+    name: node bindings (Alpine, musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: pip install ziglang cargo-zigbuild
+      - run: node bindings/node/scripts/build.js --target x86_64-unknown-linux-musl --zig
+      - name: Test in Alpine
+        run: |
+          docker run --rm -v "$PWD/bindings/node:/pkg" -w /pkg node:22-alpine \
+            sh -c 'cp npm/linux-x64-musl/vdblite.node vdblite.node && node --test "test/*.test.mjs"'
+
+  # The C library (bindings/c) and the languages on top of it.
+  bindings:
+    name: C, Go, Java, .NET (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Go's cgo links with MinGW on Windows, so it takes the GNU build.
+          targets: ${{ runner.os == 'Windows' && 'x86_64-pc-windows-gnu' || '' }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Go's copy of the header matches
+        run: cmp bindings/c/include/vdblite.h bindings/go/include/vdblite.h
+      - name: C and C++
+        if: runner.os != 'Windows'
+        run: bindings/c/scripts/test.sh
+      - name: Build the library for each language
+        run: |
+          node bindings/c/scripts/ffi.mjs dev --debug
+          if [ "$RUNNER_OS" = Windows ]; then
+            node bindings/c/scripts/ffi.mjs build win32-x64-gnu --debug
+            node bindings/c/scripts/ffi.mjs place target/ffi
+          fi
+      - name: Go
+        working-directory: bindings/go
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -d .; exit 1; }
+          go vet ./...
+          go test -count=1 ./...
+      - name: Java
+        working-directory: bindings/java
+        run: mvn -B -q test
+      - name: .NET
+        working-directory: bindings/dotnet
+        run: dotnet test tests/VDBLite.Tests
+
+  swift:
+    name: Swift (macOS, iOS build)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+      - run: bindings/swift/scripts/build-xcframework.sh --debug
+      - run: swift test
+        working-directory: bindings/swift
+      # The package must also compile for iOS devices.
+      - run: xcodebuild build -scheme VDBLite -destination 'generic/platform=iOS' -quiet
+        working-directory: bindings/swift
 
   recall:
     name: SIFT1M recall
@@ -64,7 +197,7 @@ jobs:
           path: data/sift
           key: sift1m-v1
       - run: scripts/fetch-sift1m.sh
-      - run: cargo run --release -p vecfile-index --example sift_recall -- data/sift --queries 1000
+      - run: cargo run --release -p vdblite-index --example sift_recall -- data/sift --queries 1000
 
   bench:
     name: benchmarks
@@ -74,7 +207,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench -p vecfile-index --bench distance --bench brute_force
+      - run: cargo bench -p vdblite-index --bench distance --bench brute_force
       - uses: actions/upload-artifact@v4
         with:
           name: criterion

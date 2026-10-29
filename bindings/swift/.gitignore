@@ -1,0 +1,4 @@
+.build/
+.swiftpm/
+# Built by scripts/build-xcframework.sh; releases download it.
+/CVDBLite.xcframework/

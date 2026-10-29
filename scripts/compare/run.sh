@@ -37,7 +37,7 @@ start_weaviate() {
     wait_http http://localhost:8080/v1/.well-known/ready
 }
 
-docker build -q -t vecfile-bench-client scripts/compare >/dev/null
+docker build -q -t vdblite-bench-client scripts/compare >/dev/null
 
 for engine in qdrant weaviate; do
     for quant in f32 int8; do
@@ -46,7 +46,7 @@ for engine in qdrant weaviate; do
         echo "== $engine $quant ($(docker inspect -f '{{.Config.Image}}' "bench-$engine"))"
         docker run --rm --network "container:bench-$engine" \
             -v "$PWD/data/sift:/data:ro" -v "$PWD/scripts/compare:/bench:ro" -v "$PWD/$OUT:/out" \
-            vecfile-bench-client python /bench/bench.py "$engine" --quant "$quant" \
+            vdblite-bench-client python /bench/bench.py "$engine" --quant "$quant" \
             --data /data --out "/out/$engine-$quant.json" "$@" \
             || status=$?
         if [[ -z "${status:-}" ]]; then

@@ -1,0 +1,15 @@
+[package]
+name = "vdblite-bindings"
+description = "JSON conversions shared by the vdblite language bindings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+vdblite = { path = "../../crates/vdblite" }
+serde_json = "1"
+
+[lints]
+workspace = true

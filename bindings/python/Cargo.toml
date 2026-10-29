@@ -1,0 +1,25 @@
+[package]
+name = "vdblite-python"
+description = "Python bindings for vdblite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Built by maturin, outside the main workspace: an extension module must
+# unwind on panic (the workspace's release profile aborts), and
+# `cargo test --workspace` can't link one.
+[workspace]
+
+[lib]
+name = "vdblite_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+vdblite = { path = "../../crates/vdblite" }
+pyo3 = { version = "0.29.3", features = ["extension-module", "abi3-py311"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

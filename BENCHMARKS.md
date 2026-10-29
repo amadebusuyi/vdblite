@@ -8,6 +8,62 @@ efConstruction=200 throughout. Latencies are single-query (one query at a
 time; multi-segment searches fan out over threads). recall@10 is tie-aware
 unless marked "by id".
 
+## 2026-10-26 — Phase 8: loads, memory, throughput (VectorDBBench)
+
+VectorDBBench (commit 139f8a3d, `scripts/vectordbbench/`) on Cohere 1M
+(768 dims, cosine, top 100), through the Python binding; one search process
+per client, as VectorDBBench runs them. ef 64 is raised to k × re-rank
+factor (400 for int8). Zvec 0.8 ran on the same machine with the same graph
+settings. Memory: macOS `footprint` (private memory), and peak RSS, which
+also counts the file's mapped pages (shared between processes, and clean,
+so the OS reclaims them under pressure). See `docs/design/phase-8.md`.
+
+| | Phase 7 | Step 1 | Step 2 | Step 3 | Step 4 (int8) | Step 4 (1-bit) | Zvec |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Load (insert + optimize) | 1,126 s | 1,141 s | 223 s | 230 s | **209 s** | 222 s | 194 s |
+| QPS, 8 processes (warm) | 993 | 1,885 | 1,843 | 2,523 | **2,484** (cold 2,707) | 1,810 | 2,195 |
+| QPS, 12 / 16 processes | | | 2,078 / 1,957 | 2,633 / 2,627 | 2,491 / 2,463 | 1,898 / 1,944 | 2,477 / 2,472 |
+| Serial p50 / p99 | | | 2.8 / 4.0 ms | 2.0 / 2.5 ms | 2.1 / 2.7 ms | 2.5 / 3.7 ms | 2.1 / 10.0 ms |
+| Recall@100 | 0.973 | 0.9724 | 0.9724 | 0.9735 | 0.9717 | 0.9835 | 0.9746 |
+| ef 800: QPS at 8 / recall | | | 1,156 / 0.9878 | 1,403 / 0.9878 | 1,472 / 0.9866 | | 1,329 peak / 0.9875 |
+| Private memory, 1 / 8 processes | 2.0 GB / — | 125 MB / 996 MB | | 37 MB / 298 MB | **37 MB / 299 MB** | 40 MB / 316 MB | |
+| Peak RSS, 1 process | 2.0 GB | 1.5 GB | | 1.34 GB | 1.34 GB | 0.94 GB | |
+| File (on disk) | 8.6 GB | | 7.6 (6.8) GB | 6.1 (5.3) GB | 4.5 (3.9) GB | 3.9 (3.3) GB | 3.8 GB |
+
+What each step changed:
+
+1. One file holding redb and memory-mapped regions; segments mapped, not
+   copied, and shared by every process.
+2. Bulk loads (`Db::bulk_load`): one graph built at the end with every
+   core, on int8 codes.
+3. Re-rank vectors in f16; result keys stored in the segment; a search in
+   a reading process skips its snapshot when nothing was committed.
+4. The bulk graph builds while the load runs; f16 bulk checkpoints; 1-bit
+   RaBitQ codes as an option (`quant="binary"`).
+
+Walk codes on one graph, in process (`examples/walk_sweep.rs`, Cohere 1M,
+8 threads, k=100; "rerank" is the candidate multiple of k, ef is raised to
+at least that many):
+
+| Codes | Walked bytes | rerank 4, ef 400 | rerank 4, ef 800 | rerank 8, ef 800 | rerank 16, ef 800 |
+| --- | --- | --- | --- | --- | --- |
+| int8 | 918 MB | 0.9720 · 3,033 QPS | 0.9867 · 1,696 | 0.9867 · 1,534 | 0.9927 · 818 |
+| 1-bit | 254 MB | 0.9604 · 4,462 (ef 400) | 0.9748 · 2,838 | 0.9834 · 2,212 | 0.9916 · 1,291 |
+
+The int8 file is 2.6 GB after `compact_file` (12.5 s): the load leaves
+its bulk checkpoints' space free in the file until then.
+
+So 1-bit codes are a memory option at about int8's speed for the same
+recall, not a speed-up on this machine; int8 stays the default. Through
+VectorDBBench, 1-bit at its default (rerank 8) gives more recall (0.9835)
+for less throughput (1,810).
+
+Graph builds, 1M × 768 (`examples/stream_build.rs`): one-shot 131.7 s;
+streamed in 10K batches 134.4 s (161 s before per-thread scratch was
+reused across steps). In a bulk load the build runs beside the writes and
+is the bottleneck: VectorDBBench's load is 209 s, a Python bulk load
+straight from a NumPy file 170 s.
+
 ## 2026-10-25 — Phase 7: search throughput, memory, recall
 
 1M real 768-dim embeddings (arXiv titles, InstructorXL;
